@@ -10,25 +10,46 @@
   ],
   "extraResources": [
     {
-      "from": "tools/app-audio/barracord-app-audio.exe",
-      "to": "tools/app-audio/barracord-app-audio.exe"
-    },
-    {
       "from": "electron/role.guest.json",
       "to": "barracord-role.json"
-    },
-    {
-      "from": "tools/tailscale",
-      "to": "tools/tailscale"
     }
   ],
   "win": {
-    "target": ["nsis"]
+    "target": [
+      "nsis"
+    ],
+    "extraResources": [
+      {
+        "from": "tools/app-audio/barracord-app-audio.exe",
+        "to": "tools/app-audio/barracord-app-audio.exe"
+      },
+      {
+        "from": "tools/tailscale",
+        "to": "tools/tailscale"
+      }
+    ]
   },
   "nsis": {
     "oneClick": false,
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true
+  },
+  "linux": {
+    "target": [
+      "AppImage",
+      "rpm"
+    ],
+    "category": "Network;Chat",
+    "executableName": "barracord",
+    "artifactName": "Barracord-${version}-${arch}.${ext}",
+    "synopsis": "Voz, chat e compartilhamento de tela da Barraca",
+    "maintainer": "Chris",
+    "syncDesktopName": true
+  },
+  "rpm": {
+    "depends": [
+      "tailscale"
+    ]
   }
 }

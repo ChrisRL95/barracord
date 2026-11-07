@@ -17,6 +17,25 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 const { promisify } = require('node:util')
 
 const execFileAsync = promisify(execFile)
+const isWindows = process.platform === 'win32'
+
+// Linux has no bundled installer: Tailscale comes from the distribution and
+// runs as the tailscaled system service. Elevation goes through polkit (pkexec).
+const linuxTailscalePaths = ['/usr/bin/tailscale', '/usr/sbin/tailscale', '/usr/local/bin/tailscale']
+const linuxInstallHint = 'Instale a Rede da Barraca (Tailscale) pelo gerenciador de pacotes e ative o serviço. No Fedora: sudo dnf install tailscale && sudo systemctl enable --now tailscaled'
+
+// `tailscale up` must repeat every non-default flag, so activation and
+// reconnection share one list. The operator lets this user reconnect later
+// without asking for the administrator password again.
+function linuxUpFlags() {
+  return ['--accept-dns=false', '--accept-routes=false', `--operator=${os.userInfo().username}`]
+}
+
+// pkexec exits with 126 when the password dialog is dismissed and 127 when
+// polkit refuses the request; in both cases nothing ran as root.
+function elevationCancelled(error) {
+  return !isWindows && (error?.code === 126 || error?.code === 127)
+}
 const isDevelopment = !app.isPackaged && process.env.BARRACORD_USE_DIST !== '1'
 let pendingShareRequest = null
 const preparedShareCaptures = new Map()
@@ -225,18 +244,22 @@ function unavailablePrivateNetworkStatus(installed, backendState, diagnostic, ex
 }
 
 async function readTailscaleStatus() {
-  const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-  const installedPath = path.join(programFiles, 'Tailscale', 'tailscale.exe')
-  const executable = existsSync(installedPath) ? installedPath : 'tailscale.exe'
+  const installedPath = tailscaleCliPath()
+  const executable = installedPath ?? (isWindows ? 'tailscale.exe' : 'tailscale')
   try {
     const { stdout } = await execFileAsync(executable, ['status', '--json'], { timeout: 5_000, windowsHide: true })
     const status = JSON.parse(stdout)
     return privateNetworkStatusFromTailscale(status)
   } catch (error) {
     const detail = [error?.message, error?.stderr, error?.stdout].filter((value) => typeof value === 'string').join(' ')
-    const installed = existsSync(installedPath)
+    const installed = Boolean(installedPath)
     if (!installed && /ENOENT|not recognized|não é reconhecido/i.test(detail)) {
       return unavailablePrivateNetworkStatus(false, 'NotInstalled', 'not-installed')
+    }
+    // On Linux the status socket is readable by every user, so a failed
+    // connection means the service is stopped rather than access denied.
+    if (!isWindows && /failed to connect to local tailscaled|no such file or directory|connection refused/i.test(detail)) {
+      return unavailablePrivateNetworkStatus(true, 'ServiceUnavailable', 'service-unavailable')
     }
     if (/access is denied|acesso negado|ProtectedPrefix|failed to connect to local tailscaled/i.test(detail)) {
       return unavailablePrivateNetworkStatus(true, 'AccessDenied', 'access-denied')
@@ -258,6 +281,7 @@ function localPrivateNetworkIp() {
 }
 
 function tailscaleCliPath() {
+  if (!isWindows) return linuxTailscalePaths.find((candidate) => existsSync(candidate)) ?? null
   const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
   const executable = path.join(programFiles, 'Tailscale', 'tailscale.exe')
   return existsSync(executable) ? executable : null
@@ -308,6 +332,7 @@ async function clearActivationSubmission() {
 }
 
 async function runElevated(executable, argumentsList, timeout) {
+  if (!isWindows) return execFileAsync('/usr/bin/pkexec', [executable, ...argumentsList], { timeout })
   const escapePowerShell = (value) => `'${String(value).replace(/'/g, "''")}'`
   const command = `$process = Start-Process -FilePath ${escapePowerShell(executable)} -ArgumentList @(${argumentsList.map(escapePowerShell).join(',')}) -Verb RunAs -Wait -PassThru; exit $process.ExitCode`
   const powerShell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -318,6 +343,7 @@ async function verifyTailscaleStatusWithWindows({ allowReconnect = true } = {}) 
   const regularStatus = await readTailscaleStatus()
   if (!regularStatus.installed || regularStatus.connected) return { ...regularStatus, verification: 'regular' }
 
+  if (!isWindows) return verifyTailscaleStatusOnLinux(regularStatus)
   const executable = tailscaleCliPath()
   if (!executable) return { ...regularStatus, verification: 'elevated-failed' }
 
@@ -365,7 +391,28 @@ async function verifyTailscaleStatusWithWindows({ allowReconnect = true } = {}) 
   }
 }
 
+async function verifyTailscaleStatusOnLinux(regularStatus) {
+  // The regular read is already authoritative on Linux. Only a stopped service
+  // or a disconnected node is worth acting on, and neither uses an activation.
+  const executable = tailscaleCliPath()
+  if (!executable) return { ...regularStatus, verification: 'regular' }
+  try {
+    if (regularStatus.diagnostic === 'service-unavailable') {
+      await runElevated('/usr/bin/systemctl', ['enable', '--now', 'tailscaled'], 60_000)
+    } else if (regularStatus.backendState === 'Stopped') {
+      const reconnect = ['up', ...linuxUpFlags(), '--timeout=20s']
+      try { await execFileAsync(executable, reconnect, { timeout: 30_000 }) }
+      catch { await runElevated(executable, reconnect, 30_000) }
+    } else return { ...regularStatus, verification: 'regular' }
+  } catch (error) {
+    return { ...regularStatus, verification: 'elevated-failed', verificationError: elevationCancelled(error) ? 'cancelled' : 'service-error' }
+  }
+  const status = await waitForPrivateNetwork(15_000)
+  return { ...status, verification: status.connected ? 'reconnected' : 'needs-reconnect' }
+}
+
 async function installBundledTailscale() {
+  if (!isWindows) throw new Error(linuxInstallHint)
   const installer = path.join(resourceRoot(), 'tools', 'tailscale', 'tailscale-setup-1.102.3-amd64.msi')
   if (!existsSync(installer)) throw new Error('O instalador da Rede da Barraca não foi incluído neste Barracord.')
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'barracord-tailscale-install-'))
@@ -406,6 +453,11 @@ async function activatePrivateNetwork(_event, activationCode) {
     }
     const executable = tailscaleCliPath()
     if (!executable) throw new Error('A Rede da Barraca foi instalada, mas ainda não está pronta. Abra o Barracord novamente.')
+    if (!isWindows && status.diagnostic === 'service-unavailable') {
+      try { await runElevated('/usr/bin/systemctl', ['enable', '--now', 'tailscaled'], 60_000) }
+      catch (error) { throw new Error(elevationCancelled(error) ? 'A senha de administrador é necessária para ligar o serviço da Rede da Barraca. Nenhuma ativação foi usada.' : 'Não foi possível ligar o serviço tailscaled. Nenhuma ativação foi usada.') }
+      await new Promise((resolve) => setTimeout(resolve, 3_000))
+    }
     const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'barracord-activation-'))
     const keyFile = path.join(temporaryDirectory, 'network-key.txt')
     try {
@@ -416,8 +468,19 @@ async function activatePrivateNetwork(_event, activationCode) {
         // manual recovery, but during onboarding it can discard preferences
         // while the local daemon is still settling. Unattended mode keeps the
         // Windows service active independently from the app window.
-        await runElevated(executable, ['up', `--auth-key=file:${keyFile}`, '--accept-dns=false', '--accept-routes=false', '--unattended', '--timeout=45s'], 60_000)
-      } catch { throw new Error('A ativação foi enviada ao Windows, mas não foi confirmada. Não use este código novamente; confirme o serviço ou peça uma nova ativação ao anfitrião.') }
+        const upArguments = isWindows
+          ? ['up', `--auth-key=file:${keyFile}`, '--accept-dns=false', '--accept-routes=false', '--unattended', '--timeout=45s']
+          : ['up', `--auth-key=file:${keyFile}`, ...linuxUpFlags(), '--timeout=45s']
+        await runElevated(executable, upArguments, 60_000)
+      } catch (error) {
+        // A dismissed polkit dialog means the key never reached tailscaled, so
+        // the same code can safely be used again.
+        if (elevationCancelled(error)) {
+          await clearActivationSubmission()
+          throw new Error('A ativação foi cancelada antes de chegar à Rede da Barraca. Você pode usar o mesmo código novamente.')
+        }
+        throw new Error('A ativação foi enviada ao Windows, mas não foi confirmada. Não use este código novamente; confirme o serviço ou peça uma nova ativação ao anfitrião.')
+      }
     } finally { await rm(temporaryDirectory, { recursive: true, force: true }) }
     const connected = await waitForPrivateNetwork()
     if (!connected.connected && connected.diagnostic === 'access-denied') throw new Error('A ativação foi enviada, mas o Windows bloqueou a confirmação do serviço. Não use este código novamente; confirme a Rede da Barraca com o Windows.')
@@ -445,6 +508,11 @@ function hostSecrets() {
 }
 
 async function openPrivateNetwork() {
+  if (!isWindows) {
+    if (tailscaleCliPath()) return { ok: false, action: 'open', message: 'No Linux, a Rede da Barraca roda como o serviço tailscaled e não tem janela própria. Confira com: tailscale status' }
+    await shell.openExternal('https://tailscale.com/download/linux')
+    return { ok: true, action: 'download', message: linuxInstallHint }
+  }
   const application = privateNetworkAppPath()
   if (application) {
     const error = await shell.openPath(application)
@@ -456,7 +524,7 @@ async function openPrivateNetwork() {
 
 async function readTailscaleIp() {
   const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-  const paths = [path.join(programFiles, 'Tailscale', 'tailscale.exe'), 'tailscale.exe']
+  const paths = isWindows ? [path.join(programFiles, 'Tailscale', 'tailscale.exe'), 'tailscale.exe'] : [tailscaleCliPath() ?? 'tailscale']
   for (const executable of paths) {
     try {
       const { stdout } = await execFileAsync(executable, ['ip', '-4'], { timeout: 5_000, windowsHide: true })
@@ -514,7 +582,7 @@ async function startHost() {
 
   const filesRoot = appFilesRoot()
   const resources = resourceRoot()
-  const livekit = path.join(resources, 'tools', 'livekit', 'livekit-server.exe')
+  const livekit = path.join(resources, 'tools', 'livekit', isWindows ? 'livekit-server.exe' : 'livekit-server')
   const inviteServer = path.join(filesRoot, 'server', 'host-server.cjs')
   const envFile = path.join(resources, '.env.server')
   if (!existsSync(livekit) || !existsSync(inviteServer) || !existsSync(envFile)) {
