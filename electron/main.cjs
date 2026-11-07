@@ -19,6 +19,9 @@ const { promisify } = require('node:util')
 
 const execFileAsync = promisify(execFile)
 const isWindows = process.platform === 'win32'
+// Activation messages name the system the person is using.
+const theSystem = isWindows ? 'o Windows' : 'o sistema'
+const toTheSystem = isWindows ? 'ao Windows' : 'ao sistema'
 
 // Linux has no bundled installer: Tailscale comes from the distribution and
 // runs as the tailscaled system service. Elevation goes through polkit (pkexec).
@@ -457,7 +460,7 @@ async function activatePrivateNetwork(_event, activationCode) {
       if (previousActivation?.fingerprint === fingerprint) await clearActivationSubmission()
       return { ok: true, message: 'Rede da Barraca já está conectada.' }
     }
-    if (previousActivation?.fingerprint === fingerprint) return { ok: false, message: 'Este código já foi enviado ao Windows. Não o envie novamente: confirme a Rede da Barraca com o Windows ou peça uma nova ativação ao anfitrião.' }
+    if (previousActivation?.fingerprint === fingerprint) return { ok: false, message: `Este código já foi enviado ${toTheSystem}. Não o envie novamente: confirme a Rede da Barraca com ${theSystem} ou peça uma nova ativação ao anfitrião.` }
     if (status.diagnostic === 'wrong-network') return { ok: false, message: 'Este PC está conectado a uma rede privada que não é a Rede da Barraca. Desconecte a rede atual antes de usar uma ativação.' }
     if (!status.installed) {
       await installBundledTailscale()
@@ -492,12 +495,12 @@ async function activatePrivateNetwork(_event, activationCode) {
           await clearActivationSubmission()
           throw new Error('A ativação foi cancelada antes de chegar à Rede da Barraca. Você pode usar o mesmo código novamente.')
         }
-        throw new Error('A ativação foi enviada ao Windows, mas não foi confirmada. Não use este código novamente; confirme o serviço ou peça uma nova ativação ao anfitrião.')
+        throw new Error(`A ativação foi enviada ${toTheSystem}, mas não foi confirmada. Não use este código novamente; confirme o serviço ou peça uma nova ativação ao anfitrião.`)
       }
     } finally { await rm(temporaryDirectory, { recursive: true, force: true }) }
     const connected = await waitForPrivateNetwork()
-    if (!connected.connected && connected.diagnostic === 'access-denied') throw new Error('A ativação foi enviada, mas o Windows bloqueou a confirmação do serviço. Não use este código novamente; confirme a Rede da Barraca com o Windows.')
-    if (!connected.connected) throw new Error('A ativação foi enviada, mas a Rede da Barraca ainda não confirmou o serviço. Não use este código novamente; confirme com o Windows.')
+    if (!connected.connected && connected.diagnostic === 'access-denied') throw new Error(`A ativação foi enviada, mas ${theSystem} bloqueou a confirmação do serviço. Não use este código novamente; confirme a Rede da Barraca com ${theSystem}.`)
+    if (!connected.connected) throw new Error(`A ativação foi enviada, mas a Rede da Barraca ainda não confirmou o serviço. Não use este código novamente; confirme com ${theSystem}.`)
     await clearActivationSubmission()
     return { ok: true, message: 'Rede da Barraca conectada. Agora você pode entrar.' }
   } catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'Não foi possível conectar a Rede da Barraca.' } }
