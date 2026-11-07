@@ -1,0 +1,7 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono&family=Outfit:wght@400;500;600;700&display=swap');
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #0b0d10; color: #f3f5ed; font-family: Outfit, Arial, sans-serif; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.remote-video-frame { position: absolute; inset: 0; z-index: 2; }
+.remote-video { width: 100%; height: 100%; object-fit: contain; background: #070907; }

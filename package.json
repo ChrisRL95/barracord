@@ -1,0 +1,52 @@
+{
+  "name": "barracord",
+  "description": "Sala privada da Barraca para voz, chat e compartilhamento de tela.",
+  "author": "Chris",
+  "private": true,
+  "version": "0.1.0-beta.19",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "audio:build": "node scripts/build-app-audio.cjs",
+    "dev": "vite",
+    "server": "node server/host-server.cjs",
+    "livekit": "tools\\livekit\\livekit-server.exe --dev --bind 0.0.0.0",
+    "dev:tailnet": "vite --mode tailnet --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "build:tailnet": "tsc -b && vite build --mode tailnet",
+    "desktop:dev": "concurrently -k \"npm run dev -- --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "desktop:tailnet:test": "npm run build:tailnet && set BARRACORD_USE_DIST=1&& electron .",
+    "desktop:guest:test": "npm run build:tailnet && set BARRACORD_USE_DIST=1&& set BARRACORD_ROLE=guest&& electron .",
+    "desktop:build:guest": "npm run audio:build && npm run build:tailnet && electron-builder --win nsis --config electron-builder.guest.json --config.directories.output=\"%TEMP%\\barracord-guest-release\"",
+    "desktop:build:host": "npm run audio:build && npm run build:tailnet && electron-builder --win nsis --config electron-builder.host.json --config.directories.output=\"%TEMP%\\barracord-host-release\"",
+    "desktop:build": "npm run desktop:build:host",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "0.4.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "livekit-client": "^2.22.0",
+    "livekit-server-sdk": "^2.18.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.6",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^10.0.5",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "oxlint": "^1.75.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "wait-on": "^9.1.0"
+  },
+  "build": {}
+}

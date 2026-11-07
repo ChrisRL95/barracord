@@ -1,0 +1,6 @@
+<!doctype html><title>Offline noise suppression test</title>
+<script type="module">
+import * as noise from '../../src/noiseSuppression.ts'
+import { LocalAudioTrack, Track } from 'livekit-client'
+window.noiseFixture = { ...noise, LocalAudioTrack, Track }
+</script>

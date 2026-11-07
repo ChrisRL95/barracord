@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+.env
+.env.server
+.env.tailnet
+dist
+dist-ssr
+*.local
+
+# Dados privados e artefatos gerados localmente
+data/
+installer/
+release/
+tools/app-audio/*.exe
+tools/app-audio/*.obj
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Configuração privada e binários locais
+.env.*
+!.env.example
+!.env.server.example
+!.env.tailnet.example
+backups/
+tools/

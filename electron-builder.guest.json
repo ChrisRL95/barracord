@@ -1,0 +1,34 @@
+{
+  "appId": "fun.chrisrl.barracord",
+  "productName": "Barracord",
+  "artifactName": "Barracord-Setup-${version}.${ext}",
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json",
+    "!node_modules/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "tools/app-audio/barracord-app-audio.exe",
+      "to": "tools/app-audio/barracord-app-audio.exe"
+    },
+    {
+      "from": "electron/role.guest.json",
+      "to": "barracord-role.json"
+    },
+    {
+      "from": "tools/tailscale",
+      "to": "tools/tailscale"
+    }
+  ],
+  "win": {
+    "target": ["nsis"]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
+  }
+}

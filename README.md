@@ -1,5 +1,32 @@
 ﻿# Barracord
 
-Instaladores do Barracord para convidados.
+Cliente desktop para voz, chat, compartilhamento de tela e soundboard. O anfitrião roda o servidor da Barraca e o LiveKit. A rede privada usa Tailscale.
 
-Abra [Releases](https://github.com/ChrisRL95/barracord/releases) para baixar o instalador para Windows de 64 bits. Para entrar na Barraca, use o código de ativação fornecido pelo anfitrião.
+[Instaladores de convidado para Windows](https://github.com/ChrisRL95/barracord/releases)
+
+## Desenvolvimento
+
+Com Node.js 24 e npm, rode:
+
+```sh
+npm ci
+npm run dev
+```
+
+Abra o endereço mostrado pelo Vite para trabalhar na interface. Para conectar a um anfitrião de teste, copie `.env.example` para `.env` e configure os endereços do LiveKit e do servidor de convites. Para abrir a janela Electron em desenvolvimento, rode `npm run desktop:dev`.
+
+- `src/` contém a interface React e o cliente LiveKit.
+- `electron/` contém a janela desktop, a integração de captura e o provisionamento Tailscale.
+- `server/` contém o servidor do anfitrião, a biblioteca de sons e a gestão de membros.
+- `native/app-audio/` contém o capturador WASAPI para Windows.
+
+Para executar o servidor local, copie `.env.server.example` para `.env.server` e configure credenciais próprias. Use um servidor LiveKit compatível e os mesmos valores de API nos dois serviços. Os scripts Windows esperam o binário LiveKit em `tools/livekit/` e o MSI do Tailscale em `tools/tailscale/`. A captura por aplicativo pode ser compilada no Windows com `npm run audio:build`. Para builds conectados à sua rede, copie `.env.tailnet.example` para `.env.tailnet` e configure o seu anfitrião.
+
+## Ponto de partida para o port Linux
+
+A versão distribuída atualmente usa instaladores e integração de rede específicos do Windows. Para Fedora/KDE Plasma, o primeiro recorte é um cliente convidado com chat, voz e recepção de transmissões. A adaptação passa pela detecção e ativação do Tailscale, pelo empacotamento Linux e, numa etapa posterior, pela captura de tela e de áudio no ambiente Wayland/PipeWire. A interface web e o protocolo do servidor oferecem uma base para validar voz e chat antes de trabalhar no instalador.
+
+```sh
+npm run lint
+npm run build
+```

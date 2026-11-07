@@ -1,0 +1,38 @@
+{
+  "appId": "fun.chrisrl.barracord.host",
+  "productName": "Barracord Anfitrião",
+  "artifactName": "Barracord-Anfitriao-Setup-${version}.${ext}",
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "server/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "tools/app-audio/barracord-app-audio.exe",
+      "to": "tools/app-audio/barracord-app-audio.exe"
+    },
+    {
+      "from": "electron/role.host.json",
+      "to": "barracord-role.json"
+    },
+    {
+      "from": "tools/livekit",
+      "to": "tools/livekit"
+    },
+    {
+      "from": ".env.server",
+      "to": ".env.server"
+    }
+  ],
+  "win": {
+    "target": ["nsis"]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
+  }
+}

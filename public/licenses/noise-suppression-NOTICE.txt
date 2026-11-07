@@ -1,0 +1,16 @@
+Barracord microphone noise suppression
+
+@sapphi-red/web-noise-suppressor 0.4.1
+https://github.com/sapphi-red/web-noise-suppressor
+MIT license: web-noise-suppressor-MIT.txt
+
+The bundled RNNoise WASM derives from @shiguredo/rnnoise-wasm 2022.2.0:
+https://github.com/shiguredo/rnnoise-wasm/tree/2022.2.0
+Apache License 2.0: rnnoise-wasm-Apache-2.0.txt
+
+RNNoise original project:
+https://github.com/xiph/rnnoise
+BSD 3-Clause license and original copyright notices: rnnoise-BSD-3-Clause.txt
+
+Barracord wraps the pinned worklet to acknowledge asynchronous initialization
+and start the worklet message port; the underlying model is unchanged.
