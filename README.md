@@ -4,6 +4,14 @@ Cliente desktop para voz, chat, compartilhamento de tela e soundboard. O anfitri
 
 [Instaladores de convidado para Windows](https://github.com/ChrisRL95/barracord/releases)
 
+## Atualizações do convidado no Windows
+
+A partir da beta.20, o instalador NSIS do convidado verifica o canal beta no GitHub. A seta no cabeçalho baixa e instala a versão disponível. Durante uma call, o download pode terminar, e a instalação fica para um clique depois de sair.
+
+Para publicar uma nova beta, aumente a versão em `package.json` e no lockfile, gere o instalador convidado e anexe o `.exe`, o `.exe.blockmap` e o `beta.yml` da mesma compilação à pré-release `v<versão>`. Publique os três arquivos juntos para que os clientes encontrem o manifesto e o instalador correspondente.
+
+O atualizador é ativado no convidado Windows empacotado. A partir da beta.21, a verificação acontece ao abrir o app e a cada minuto enquanto ele estiver aberto. A versão de anfitrião usa um instalador próprio. Quem ainda usa a beta.19 precisa instalar manualmente uma versão com o atualizador.
+
 ## Desenvolvimento
 
 Com Node.js 24 e npm, rode:
@@ -22,11 +30,13 @@ Abra o endereço mostrado pelo Vite para trabalhar na interface. Para conectar a
 
 Para executar o servidor local, copie `.env.server.example` para `.env.server` e configure credenciais próprias. Use um servidor LiveKit compatível e os mesmos valores de API nos dois serviços. Os scripts Windows esperam o binário LiveKit em `tools/livekit/` e o MSI do Tailscale em `tools/tailscale/`. A captura por aplicativo pode ser compilada no Windows com `npm run audio:build`. Para builds conectados à sua rede, copie `.env.tailnet.example` para `.env.tailnet` e configure o seu anfitrião.
 
-## Ponto de partida para o port Linux
+## Cliente convidado para Linux
 
-A versão distribuída atualmente usa instaladores e integração de rede específicos do Windows. Para Fedora/KDE Plasma, o primeiro recorte é um cliente convidado com chat, voz e recepção de transmissões. A adaptação passa pela detecção e ativação do Tailscale, pelo empacotamento Linux e, numa etapa posterior, pela captura de tela e de áudio no ambiente Wayland/PipeWire. A interface web e o protocolo do servidor oferecem uma base para validar voz e chat antes de trabalhar no instalador.
+No Linux, instale as dependências com `npm ci` e configure `.env.tailnet` com os endereços do anfitrião. Use o comando de teste para abrir o convidado ou o comando de empacotamento para gerar AppImage e RPM em `release/guest-linux/`.
 
 ```sh
-npm run lint
-npm run build
+npm run desktop:guest:linux:test
+npm run desktop:build:guest:linux
 ```
+
+Os perfis funcionam nos dois clientes quando a Barraca usa o servidor atualizado. No Fedora com KDE Plasma, valide também o compartilhamento pelo seletor Wayland e o áudio pelo PipeWire.
