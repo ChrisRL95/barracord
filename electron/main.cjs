@@ -534,8 +534,18 @@ function hostSecrets() {
       const [key, ...parts] = line.split('=')
       return [key?.trim(), parts.join('=').trim()]
     }).filter(([key]) => Boolean(key)))
-    return { code: values.APP_INVITE_CODE, port: Number(values.TOKEN_SERVER_PORT || 3001) }
+    return { code: values.APP_INVITE_CODE, port: Number(values.TOKEN_SERVER_PORT || 3001), apiKey: values.LIVEKIT_API_KEY, apiSecret: values.LIVEKIT_API_SECRET }
   } catch { return { code: '', port: 3001 } }
+}
+
+// LiveKit avisa o servidor de convites a cada entrada, saída ou transmissão, e
+// a lista de canais de todos atualiza na hora. O config vai por variável de
+// ambiente (YAML aceita JSON) para o segredo não aparecer na lista de processos.
+function livekitEnvironment() {
+  const { apiKey, apiSecret, port } = hostSecrets()
+  if (!apiKey || !apiSecret) return process.env
+  const config = { keys: { [apiKey]: apiSecret }, webhook: { api_key: apiKey, urls: [`http://127.0.0.1:${port}/livekit/webhook`] } }
+  return { ...process.env, LIVEKIT_CONFIG: JSON.stringify(config) }
 }
 
 async function openPrivateNetwork() {
@@ -623,7 +633,7 @@ async function startHost() {
 
   setHostState('starting', 'Abrindo a Barraca…', tailnetIp)
   livekitLogDescriptor = openLivekitLog()
-  const childOptions = { cwd: resources, windowsHide: true, stdio: ['ignore', livekitLogDescriptor, livekitLogDescriptor] }
+  const childOptions = { cwd: resources, env: livekitEnvironment(), windowsHide: true, stdio: ['ignore', livekitLogDescriptor, livekitLogDescriptor] }
   livekitProcess = spawn(livekit, ['--dev', '--bind', '0.0.0.0', '--node-ip', tailnetIp], childOptions)
   try {
     process.env.BARRACORD_ENV_FILE = envFile
