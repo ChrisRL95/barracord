@@ -1,4 +1,5 @@
 import { LocalAudioTrack, Track } from 'livekit-client'
+import { systemText } from './platformText'
 import type { AudioCaptureOptions, AudioProcessorOptions, Room, TrackProcessor } from 'livekit-client'
 import workletSource from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?raw'
 import wasmUrl from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url&inline'
@@ -181,7 +182,7 @@ export class MicrophoneController {
       if (!track) {
         const tracks = await this.room.localParticipant.createTracks({ audio: microphoneCaptureOptions(this.mode, this.device()) })
         track = tracks.find((item): item is LocalAudioTrack => item instanceof LocalAudioTrack)
-        if (!track) { tracks.forEach((item) => item.stop()); throw new Error('O Windows não devolveu o microfone.') }
+        if (!track) { tracks.forEach((item) => item.stop()); throw new Error(`${systemText.The} não devolveu o microfone.`) }
         this.preparing = track
         try {
           await this.configure(track)

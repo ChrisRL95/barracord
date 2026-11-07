@@ -6,7 +6,8 @@ const { createHash } = require('node:crypto')
 const os = require('node:os')
 const path = require('node:path')
 const { createAppAudioBridge } = require('./app-audio.cjs')
-const appAudio = createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
+const { createLinuxAudioBridge } = require('./app-audio-linux.cjs')
+const appAudio = process.platform === 'linux' ? createLinuxAudioBridge() : createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
 
 // Remote call and screen-share audio can arrive after the user has joined a
 // room. Electron otherwise applies Chromium's autoplay policy to that late
@@ -14,9 +15,46 @@ const appAudio = createAppAudioBridge({ executable: path.join(app.isPackaged ? p
 // The Barracord is a native call client, so playback is expected once the user
 // has explicitly entered a voice channel.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
+// Chromium locks the profile's local storage. A second copy of the app could
+// not open it and would silently start with empty storage: no name, no
+// authorization and a new installation id, which the host then rejects.
+// Keep a single copy per profile and bring its window forward instead. The
+// lock is per profile folder, so the host and guest apps still coexist.
+const isPrimaryInstance = app.requestSingleInstanceLock()
+if (!isPrimaryInstance) app.quit()
+app.on('second-instance', () => {
+  const window = BrowserWindow.getAllWindows()[0]
+  if (!window) return
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+})
 const { promisify } = require('node:util')
 
 const execFileAsync = promisify(execFile)
+const isWindows = process.platform === 'win32'
+// Activation messages name the system the person is using.
+const theSystem = isWindows ? 'o Windows' : 'o sistema'
+const toTheSystem = isWindows ? 'ao Windows' : 'ao sistema'
+
+// Linux has no bundled installer: Tailscale comes from the distribution and
+// runs as the tailscaled system service. Elevation goes through polkit (pkexec).
+const linuxTailscalePaths = ['/usr/bin/tailscale', '/usr/sbin/tailscale', '/usr/local/bin/tailscale']
+const linuxInstallHint = 'Instale a Rede da Barraca (Tailscale) pelo gerenciador de pacotes e ative o serviço. No Fedora: sudo dnf install tailscale && sudo systemctl enable --now tailscaled'
+
+// `tailscale up` must repeat every non-default flag, so activation and
+// reconnection share one list. The operator lets this user reconnect later
+// without asking for the administrator password again.
+function linuxUpFlags() {
+  return ['--accept-dns=false', '--accept-routes=false', `--operator=${os.userInfo().username}`]
+}
+
+// pkexec exits with 126 when the password dialog is dismissed and 127 when
+// polkit refuses the request; in both cases nothing ran as root.
+function elevationCancelled(error) {
+  return !isWindows && (error?.code === 126 || error?.code === 127)
+}
 const isDevelopment = !app.isPackaged && process.env.BARRACORD_USE_DIST !== '1'
 let pendingShareRequest = null
 const preparedShareCaptures = new Map()
@@ -117,6 +155,18 @@ function configureMediaPermissions() {
 
   session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     if (!isTrustedOrigin(request.securityOrigin)) return callback({})
+    if (process.platform === 'linux') {
+      // On Wayland every getSources call opens the desktop portal's own picker
+      // and returns only what the person chose there. Ask exactly once, with no
+      // thumbnails: a second request, or the short thumbnail stream, races the
+      // portal while it is starting the real stream (seen crashing
+      // xdg-desktop-portal-kde 6.7). Sound comes from PipeWire instead
+      // (app-audio-linux.cjs), so the portal is asked for video only.
+      desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
+        .then((sources) => callback(sources[0] ? { video: sources[0] } : {}))
+        .catch(() => callback({}))
+      return
+    }
     desktopCapturer.getSources({
         types: ['screen', 'window'],
         thumbnailSize: { width: 480, height: 270 },
@@ -225,18 +275,22 @@ function unavailablePrivateNetworkStatus(installed, backendState, diagnostic, ex
 }
 
 async function readTailscaleStatus() {
-  const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-  const installedPath = path.join(programFiles, 'Tailscale', 'tailscale.exe')
-  const executable = existsSync(installedPath) ? installedPath : 'tailscale.exe'
+  const installedPath = tailscaleCliPath()
+  const executable = installedPath ?? (isWindows ? 'tailscale.exe' : 'tailscale')
   try {
     const { stdout } = await execFileAsync(executable, ['status', '--json'], { timeout: 5_000, windowsHide: true })
     const status = JSON.parse(stdout)
     return privateNetworkStatusFromTailscale(status)
   } catch (error) {
     const detail = [error?.message, error?.stderr, error?.stdout].filter((value) => typeof value === 'string').join(' ')
-    const installed = existsSync(installedPath)
+    const installed = Boolean(installedPath)
     if (!installed && /ENOENT|not recognized|não é reconhecido/i.test(detail)) {
       return unavailablePrivateNetworkStatus(false, 'NotInstalled', 'not-installed')
+    }
+    // On Linux the status socket is readable by every user, so a failed
+    // connection means the service is stopped rather than access denied.
+    if (!isWindows && /failed to connect to local tailscaled|no such file or directory|connection refused/i.test(detail)) {
+      return unavailablePrivateNetworkStatus(true, 'ServiceUnavailable', 'service-unavailable')
     }
     if (/access is denied|acesso negado|ProtectedPrefix|failed to connect to local tailscaled/i.test(detail)) {
       return unavailablePrivateNetworkStatus(true, 'AccessDenied', 'access-denied')
@@ -258,6 +312,7 @@ function localPrivateNetworkIp() {
 }
 
 function tailscaleCliPath() {
+  if (!isWindows) return linuxTailscalePaths.find((candidate) => existsSync(candidate)) ?? null
   const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
   const executable = path.join(programFiles, 'Tailscale', 'tailscale.exe')
   return existsSync(executable) ? executable : null
@@ -308,6 +363,7 @@ async function clearActivationSubmission() {
 }
 
 async function runElevated(executable, argumentsList, timeout) {
+  if (!isWindows) return execFileAsync('/usr/bin/pkexec', [executable, ...argumentsList], { timeout })
   const escapePowerShell = (value) => `'${String(value).replace(/'/g, "''")}'`
   const command = `$process = Start-Process -FilePath ${escapePowerShell(executable)} -ArgumentList @(${argumentsList.map(escapePowerShell).join(',')}) -Verb RunAs -Wait -PassThru; exit $process.ExitCode`
   const powerShell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -318,6 +374,7 @@ async function verifyTailscaleStatusWithWindows({ allowReconnect = true } = {}) 
   const regularStatus = await readTailscaleStatus()
   if (!regularStatus.installed || regularStatus.connected) return { ...regularStatus, verification: 'regular' }
 
+  if (!isWindows) return verifyTailscaleStatusOnLinux(regularStatus)
   const executable = tailscaleCliPath()
   if (!executable) return { ...regularStatus, verification: 'elevated-failed' }
 
@@ -365,7 +422,28 @@ async function verifyTailscaleStatusWithWindows({ allowReconnect = true } = {}) 
   }
 }
 
+async function verifyTailscaleStatusOnLinux(regularStatus) {
+  // The regular read is already authoritative on Linux. Only a stopped service
+  // or a disconnected node is worth acting on, and neither uses an activation.
+  const executable = tailscaleCliPath()
+  if (!executable) return { ...regularStatus, verification: 'regular' }
+  try {
+    if (regularStatus.diagnostic === 'service-unavailable') {
+      await runElevated('/usr/bin/systemctl', ['enable', '--now', 'tailscaled'], 60_000)
+    } else if (regularStatus.backendState === 'Stopped') {
+      const reconnect = ['up', ...linuxUpFlags(), '--timeout=20s']
+      try { await execFileAsync(executable, reconnect, { timeout: 30_000 }) }
+      catch { await runElevated(executable, reconnect, 30_000) }
+    } else return { ...regularStatus, verification: 'regular' }
+  } catch (error) {
+    return { ...regularStatus, verification: 'elevated-failed', verificationError: elevationCancelled(error) ? 'cancelled' : 'service-error' }
+  }
+  const status = await waitForPrivateNetwork(15_000)
+  return { ...status, verification: status.connected ? 'reconnected' : 'needs-reconnect' }
+}
+
 async function installBundledTailscale() {
+  if (!isWindows) throw new Error(linuxInstallHint)
   const installer = path.join(resourceRoot(), 'tools', 'tailscale', 'tailscale-setup-1.102.3-amd64.msi')
   if (!existsSync(installer)) throw new Error('O instalador da Rede da Barraca não foi incluído neste Barracord.')
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'barracord-tailscale-install-'))
@@ -397,7 +475,7 @@ async function activatePrivateNetwork(_event, activationCode) {
       if (previousActivation?.fingerprint === fingerprint) await clearActivationSubmission()
       return { ok: true, message: 'Rede da Barraca já está conectada.' }
     }
-    if (previousActivation?.fingerprint === fingerprint) return { ok: false, message: 'Este código já foi enviado ao Windows. Não o envie novamente: confirme a Rede da Barraca com o Windows ou peça uma nova ativação ao anfitrião.' }
+    if (previousActivation?.fingerprint === fingerprint) return { ok: false, message: `Este código já foi enviado ${toTheSystem}. Não o envie novamente: confirme a Rede da Barraca com ${theSystem} ou peça uma nova ativação ao anfitrião.` }
     if (status.diagnostic === 'wrong-network') return { ok: false, message: 'Este PC está conectado a uma rede privada que não é a Rede da Barraca. Desconecte a rede atual antes de usar uma ativação.' }
     if (!status.installed) {
       await installBundledTailscale()
@@ -406,6 +484,11 @@ async function activatePrivateNetwork(_event, activationCode) {
     }
     const executable = tailscaleCliPath()
     if (!executable) throw new Error('A Rede da Barraca foi instalada, mas ainda não está pronta. Abra o Barracord novamente.')
+    if (!isWindows && status.diagnostic === 'service-unavailable') {
+      try { await runElevated('/usr/bin/systemctl', ['enable', '--now', 'tailscaled'], 60_000) }
+      catch (error) { throw new Error(elevationCancelled(error) ? 'A senha de administrador é necessária para ligar o serviço da Rede da Barraca. Nenhuma ativação foi usada.' : 'Não foi possível ligar o serviço tailscaled. Nenhuma ativação foi usada.') }
+      await new Promise((resolve) => setTimeout(resolve, 3_000))
+    }
     const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'barracord-activation-'))
     const keyFile = path.join(temporaryDirectory, 'network-key.txt')
     try {
@@ -416,12 +499,23 @@ async function activatePrivateNetwork(_event, activationCode) {
         // manual recovery, but during onboarding it can discard preferences
         // while the local daemon is still settling. Unattended mode keeps the
         // Windows service active independently from the app window.
-        await runElevated(executable, ['up', `--auth-key=file:${keyFile}`, '--accept-dns=false', '--accept-routes=false', '--unattended', '--timeout=45s'], 60_000)
-      } catch { throw new Error('A ativação foi enviada ao Windows, mas não foi confirmada. Não use este código novamente; confirme o serviço ou peça uma nova ativação ao anfitrião.') }
+        const upArguments = isWindows
+          ? ['up', `--auth-key=file:${keyFile}`, '--accept-dns=false', '--accept-routes=false', '--unattended', '--timeout=45s']
+          : ['up', `--auth-key=file:${keyFile}`, ...linuxUpFlags(), '--timeout=45s']
+        await runElevated(executable, upArguments, 60_000)
+      } catch (error) {
+        // A dismissed polkit dialog means the key never reached tailscaled, so
+        // the same code can safely be used again.
+        if (elevationCancelled(error)) {
+          await clearActivationSubmission()
+          throw new Error('A ativação foi cancelada antes de chegar à Rede da Barraca. Você pode usar o mesmo código novamente.')
+        }
+        throw new Error(`A ativação foi enviada ${toTheSystem}, mas não foi confirmada. Não use este código novamente; confirme o serviço ou peça uma nova ativação ao anfitrião.`)
+      }
     } finally { await rm(temporaryDirectory, { recursive: true, force: true }) }
     const connected = await waitForPrivateNetwork()
-    if (!connected.connected && connected.diagnostic === 'access-denied') throw new Error('A ativação foi enviada, mas o Windows bloqueou a confirmação do serviço. Não use este código novamente; confirme a Rede da Barraca com o Windows.')
-    if (!connected.connected) throw new Error('A ativação foi enviada, mas a Rede da Barraca ainda não confirmou o serviço. Não use este código novamente; confirme com o Windows.')
+    if (!connected.connected && connected.diagnostic === 'access-denied') throw new Error(`A ativação foi enviada, mas ${theSystem} bloqueou a confirmação do serviço. Não use este código novamente; confirme a Rede da Barraca com ${theSystem}.`)
+    if (!connected.connected) throw new Error(`A ativação foi enviada, mas a Rede da Barraca ainda não confirmou o serviço. Não use este código novamente; confirme com ${theSystem}.`)
     await clearActivationSubmission()
     return { ok: true, message: 'Rede da Barraca conectada. Agora você pode entrar.' }
   } catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'Não foi possível conectar a Rede da Barraca.' } }
@@ -445,6 +539,11 @@ function hostSecrets() {
 }
 
 async function openPrivateNetwork() {
+  if (!isWindows) {
+    if (tailscaleCliPath()) return { ok: false, action: 'open', message: 'No Linux, a Rede da Barraca roda como o serviço tailscaled e não tem janela própria. Confira com: tailscale status' }
+    await shell.openExternal('https://tailscale.com/download/linux')
+    return { ok: true, action: 'download', message: linuxInstallHint }
+  }
   const application = privateNetworkAppPath()
   if (application) {
     const error = await shell.openPath(application)
@@ -456,7 +555,7 @@ async function openPrivateNetwork() {
 
 async function readTailscaleIp() {
   const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-  const paths = [path.join(programFiles, 'Tailscale', 'tailscale.exe'), 'tailscale.exe']
+  const paths = isWindows ? [path.join(programFiles, 'Tailscale', 'tailscale.exe'), 'tailscale.exe'] : [tailscaleCliPath() ?? 'tailscale']
   for (const executable of paths) {
     try {
       const { stdout } = await execFileAsync(executable, ['ip', '-4'], { timeout: 5_000, windowsHide: true })
@@ -514,7 +613,7 @@ async function startHost() {
 
   const filesRoot = appFilesRoot()
   const resources = resourceRoot()
-  const livekit = path.join(resources, 'tools', 'livekit', 'livekit-server.exe')
+  const livekit = path.join(resources, 'tools', 'livekit', isWindows ? 'livekit-server.exe' : 'livekit-server')
   const inviteServer = path.join(filesRoot, 'server', 'host-server.cjs')
   const envFile = path.join(resources, '.env.server')
   if (!existsSync(livekit) || !existsSync(inviteServer) || !existsSync(envFile)) {
@@ -620,6 +719,10 @@ ipcMain.handle('app-audio:start', (event, sourceIds) => {
   if (!isTrustedOrigin(event.senderFrame?.url || event.sender.getURL())) return { ok: false, error: 'Origem não autorizada.' }
   return appAudio.start(event.sender, sourceIds)
 })
+ipcMain.handle('app-audio:list', (event) => {
+  if (!isTrustedOrigin(event.senderFrame?.url || event.sender.getURL())) return []
+  return appAudio.listSources ? appAudio.listSources() : []
+})
 ipcMain.handle('app-audio:stop', (event, id) => {
   if (!isTrustedOrigin(event.senderFrame?.url || event.sender.getURL()) || typeof id !== 'string') return false
   return appAudio.stop(event.sender.id, id)
@@ -642,6 +745,7 @@ ipcMain.handle('share:sources', async (event) => {
 })
 
 app.whenReady().then(() => {
+  if (!isPrimaryInstance) return
   configureMediaPermissions()
   createWindow()
   app.on('activate', () => {

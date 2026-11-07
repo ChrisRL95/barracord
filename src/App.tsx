@@ -4,6 +4,8 @@ import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoQuality 
 import { captureAppAudio } from './appAudio'
 import type { AppAudioCapture } from './appAudio'
 import SharePicker from './SharePicker'
+import LinuxSharePicker from './LinuxSharePicker'
+import { isLinuxDesktop, systemText } from './platformText'
 import Soundboard from './Soundboard'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
@@ -254,6 +256,7 @@ function App() {
     return saved === 'auto' || saved === 'smooth' || saved === 'gaming' || saved === 'maximum' ? saved : 'maximum'
   })
   const [shareSources, setShareSources] = useState<ShareSource[] | null>(null)
+  const [linuxShareOpen, setLinuxShareOpen] = useState(false)
   const [tailscaleStatus, setTailscaleStatus] = useState<'ready' | 'missing' | 'offline' | 'needs-attention' | null>(null)
   const [privateNetworkAction, setPrivateNetworkAction] = useState(false)
   const [privateNetworkChecking, setPrivateNetworkChecking] = useState(false)
@@ -437,22 +440,22 @@ function App() {
     setPrivateNetworkChecking(true)
     try {
       const check = confirmWithWindows ? window.chriscordDesktop.verifyTailscaleStatus() : window.chriscordDesktop.tailscaleStatus()
-      const status = await withTimeout(check, 30_000, 'A confirmação do Windows demorou mais que o esperado.')
+      const status = await withTimeout(check, 30_000, `A confirmação ${systemText.of} demorou mais que o esperado.`)
       const nextStatus = !status.installed ? 'missing' : status.connected ? 'ready' : status.diagnostic === 'wrong-network' || status.diagnostic === 'access-denied' || status.diagnostic === 'service-unavailable' || status.diagnostic === 'unavailable' ? 'needs-attention' : 'offline'
       setTailscaleStatus(nextStatus)
       if (status.connected) setPrivateNetworkMessage('Conexão privada pronta. Agora informe seu nome e convite.')
       else if (status.diagnostic === 'wrong-network') setPrivateNetworkMessage('Este PC está conectado a uma rede privada diferente. Por segurança, o Barracord não vai trocar essa rede sozinho. Desconecte-a antes de usar a ativação.')
-      else if ('verification' in status && 'verificationError' in status && status.verification === 'elevated-failed' && status.verificationError === 'cancelled') setPrivateNetworkMessage('A confirmação do Windows foi cancelada. Nenhuma ativação foi usada.')
-      else if ('verification' in status && status.verification === 'elevated-failed') setPrivateNetworkMessage('O Windows autorizou a consulta, mas o Barracord não conseguiu ler o estado da Rede da Barraca. O código pode já ter sido usado; não o envie novamente. Feche e abra o app e confirme uma vez.')
+      else if ('verification' in status && 'verificationError' in status && status.verification === 'elevated-failed' && status.verificationError === 'cancelled') setPrivateNetworkMessage(`A confirmação ${systemText.of} foi cancelada. Nenhuma ativação foi usada.`)
+      else if ('verification' in status && status.verification === 'elevated-failed') setPrivateNetworkMessage(`${systemText.The} autorizou a consulta, mas o Barracord não conseguiu ler o estado da Rede da Barraca. O código pode já ter sido usado; não o envie novamente. Feche e abra o app e confirme uma vez.`)
       else if ('verification' in status && status.verification === 'needs-reconnect') setPrivateNetworkMessage('A Rede da Barraca ainda não terminou de iniciar. O Barracord tentou religar este computador sem usar uma nova ativação. Aguarde alguns segundos e confirme novamente.')
-      else if (status.diagnostic === 'access-denied') setPrivateNetworkMessage('O Windows bloqueou a consulta ao serviço da Rede da Barraca. Clique em “Confirmar com Windows” para verificar sem usar uma ativação.')
-      else if (status.diagnostic === 'service-unavailable') setPrivateNetworkMessage('A Rede da Barraca está instalada, mas o serviço do Windows não respondeu. Aguarde a instalação terminar antes de tentar ativar novamente.')
+      else if (status.diagnostic === 'access-denied') setPrivateNetworkMessage(`${systemText.The} bloqueou a consulta ao serviço da Rede da Barraca. Clique em “${systemText.confirm}” para verificar sem usar uma ativação.`)
+      else if (status.diagnostic === 'service-unavailable') setPrivateNetworkMessage(`A Rede da Barraca está instalada, mas o serviço ${systemText.of} não respondeu. Aguarde a instalação terminar antes de tentar ativar novamente.`)
       else if (status.installed) setPrivateNetworkMessage(`A Rede da Barraca ainda está iniciando (${status.backendState}). Esta verificação foi refeita agora.`)
       else setPrivateNetworkMessage('A Rede da Barraca ainda não está instalada neste computador.')
     } catch (error) {
       setTailscaleStatus('needs-attention')
-      if (error instanceof Error && error.message === 'A confirmação do Windows demorou mais que o esperado.') {
-        setPrivateNetworkMessage('A confirmação do Windows demorou mais que o esperado. Procure uma janela de confirmação escondida; se não houver, feche e abra o Barracord e tente “Confirmar com Windows” uma vez.')
+      if (error instanceof Error && error.message === `A confirmação ${systemText.of} demorou mais que o esperado.`) {
+        setPrivateNetworkMessage(`A confirmação ${systemText.of} demorou mais que o esperado. Procure uma janela de confirmação escondida; se não houver, feche e abra o Barracord e tente “${systemText.confirm}” uma vez.`)
       } else setPrivateNetworkMessage('Não foi possível consultar a Rede da Barraca neste momento.')
     }
     finally { setPrivateNetworkChecking(false) }
@@ -658,7 +661,7 @@ function App() {
       setStartWithWindows(status.enabled)
       setStartWithWindowsAvailable(status.available)
       if (!status.available) setMessage('Essa opção estará disponível no instalador do Anfitrião.')
-    } catch { setMessage('Não foi possível alterar a inicialização com o Windows.') }
+    } catch { setMessage(`Não foi possível alterar a inicialização com ${systemText.the}.`) }
   }
 
   function resetRoom(messageText: string) {
@@ -816,7 +819,7 @@ function App() {
           // audio, which is published after the video track.
           void audio.play().catch((error) => {
             const label = isStreamAudio ? 'da transmissão' : 'da call'
-            recordSafeEvent('error', `O áudio ${label} de ${participant.name || identity} foi recebido, mas o Windows bloqueou a reprodução: ${error instanceof Error ? error.message : 'erro desconhecido'}.`)
+            recordSafeEvent('error', `O áudio ${label} de ${participant.name || identity} foi recebido, mas ${systemText.the} bloqueou a reprodução: ${error instanceof Error ? error.message : 'erro desconhecido'}.`)
             if (isStreamAudio) setMessage(`O som da transmissão de ${participant.name || identity} chegou, mas este computador bloqueou a reprodução. Clique na transmissão para liberar o áudio.`)
           })
         }
@@ -842,7 +845,7 @@ function App() {
       if (!isReconnect && voiceKeyMode !== 'push-to-talk') {
         try {
           microphoneEnabled = await microphoneController(room).setEnabled(true)
-        } catch { setMessage('Você entrou, mas o Windows bloqueou o microfone.', 'warning') }
+        } catch { setMessage(`Você entrou, mas ${systemText.the} bloqueou o microfone.`, 'warning') }
       }
       roomRef.current = room
       setRoomName(targetRoom)
@@ -886,7 +889,7 @@ function App() {
       let networkDeviceId: string | undefined
       if (window.chriscordDesktop && !isHostApp) {
         const status = await window.chriscordDesktop.tailscaleStatus()
-        if (!status.connected || !status.taggedForBarraca || !status.deviceId) throw new Error('A Rede da Barraca não confirmou a identidade deste computador. Clique em “Confirmar com Windows” e tente novamente.')
+        if (!status.connected || !status.taggedForBarraca || !status.deviceId) throw new Error(`A Rede da Barraca não confirmou a identidade deste computador. Clique em “${systemText.confirm}” e tente novamente.`)
         networkDeviceId = status.deviceId
       }
       const registerEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/register')
@@ -964,7 +967,7 @@ function App() {
     try {
       const actual = await microphoneController(room).setEnabled(!microphoneOn)
       if (roomRef.current === room) setMicrophoneOn(actual)
-    } catch { setMessage('O Windows bloqueou o acesso ao microfone.', 'error') }
+    } catch { setMessage(`${systemText.The} bloqueou o acesso ao microfone.`, 'error') }
   }
 
   async function toggleDeafen() {
@@ -1132,10 +1135,20 @@ function App() {
         maxFrameRate: profile.frameRate,
       },
     }
-    setMessage('O Windows está iniciando a captura da tela…')
+    setMessage(isLinuxDesktop ? 'Escolha a tela ou janela na janela do sistema…' : 'O Windows está iniciando a captura da tela…')
     let systemAudioWarning = ''
     let stream: MediaStream
-    if (audioMode === 'system' && window.chriscordDesktop) {
+    if (isLinuxDesktop) {
+      // The desktop portal's dialog opens here and waits for the person, so
+      // there is no timeout. Sound never comes from the portal: PipeWire
+      // provides it below through the app-audio bridge.
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ audio: false, video: { width: profile.width, height: profile.height, frameRate: profile.frameRate } })
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'NotAllowedError') throw new Error('A escolha de tela foi cancelada.')
+        throw error
+      }
+    } else if (audioMode === 'system' && window.chriscordDesktop) {
       const prepared = await window.chriscordDesktop.prepareShareCapture(sourceId, true)
       if (!prepared.ok) throw new Error('O Windows não preparou o áudio do sistema para esta transmissão.')
       try {
@@ -1175,7 +1188,7 @@ function App() {
     const mediaTrack = stream.getVideoTracks()[0]
     if (!mediaTrack || roomRef.current !== room) {
       stream.getTracks().forEach((track) => track.stop())
-      throw new Error('A captura foi cancelada ou o Windows não devolveu vídeo.')
+      throw new Error(`A captura foi cancelada ou ${systemText.the} não devolveu vídeo.`)
     }
     mediaTrack.contentHint = 'detail'
     const localTrack = new LocalVideoTrack(mediaTrack, video, true)
@@ -1184,9 +1197,10 @@ function App() {
     let appCapture: AppAudioCapture | null = null
     let localAudioTrack: LocalAudioTrack | null = null
     try {
-      if (audioMode === 'application') {
+      if (audioMode === 'application' || (isLinuxDesktop && audioMode === 'system')) {
         try {
-          appCapture = await captureAppAudio(audioSourceIds, (detail) => {
+          // On Linux, "system" means every application except Barracord itself.
+          appCapture = await captureAppAudio(isLinuxDesktop && audioMode === 'system' ? ['pipewire:all'] : audioSourceIds, (detail) => {
             const audio = localScreenAudioTrackRef.current
             if (audio && audio.mediaStreamTrack === appCapture?.track) {
               localScreenAudioTrackRef.current = null
@@ -1199,7 +1213,7 @@ function App() {
           systemAudioTrack = appCapture.track
           appAudioCaptureRef.current = appCapture
         } catch (error) {
-          systemAudioWarning = `A transmissão seguirá sem áudio. ${error instanceof Error ? error.message : 'O Windows não iniciou a captura do aplicativo.'}`
+          systemAudioWarning = `A transmissão seguirá sem áudio. ${error instanceof Error ? error.message : `${systemText.The} não iniciou a captura do aplicativo.`}`
           recordSafeEvent('warning', 'application-audio-capture-failed')
         }
       }
@@ -1255,7 +1269,7 @@ function App() {
           recordSafeEvent('warning', 'screen-audio-publish-failed')
         }
       } else if (shareAudio && !systemAudioWarning) {
-        systemAudioWarning = 'A tela está ao vivo, mas o Windows não devolveu áudio do sistema.'
+        systemAudioWarning = `A tela está ao vivo, mas ${systemText.the} não devolveu áudio do sistema.`
         recordSafeEvent('warning', 'screen-audio-track-missing')
       }
       if (roomRef.current !== room || mediaTrack.readyState !== 'live' || (appCapture && systemAudioTrack?.readyState !== 'live')) {
@@ -1279,7 +1293,7 @@ function App() {
   }
 
   async function toggleScreenShare() {
-    if (shareStartPendingRef.current) { setMessage('Aguarde o Windows concluir o início da transmissão.'); return }
+    if (shareStartPendingRef.current) { setMessage(`Aguarde ${systemText.the} concluir o início da transmissão.`); return }
     const room = roomRef.current
     if (!room) return
     try {
@@ -1293,12 +1307,13 @@ function App() {
         localScreenAudioTrackRef.current = null
         // LocalTrackUnpublished keeps the visual state in sync, including when
         // Windows ends a capture outside of the Barracord.
-      } else if (window.chriscordDesktop) {
+      } else if (window.chriscordDesktop && !isLinuxDesktop) {
         const sources = await window.chriscordDesktop.getShareSources()
         if (!sources.length) throw new Error('O Windows não encontrou telas ou janelas para compartilhar.')
         setShareSources(sources)
         setMessage('Escolha uma tela ou janela para transmitir.')
-      } else await startScreenShare(room)
+      } else if (isLinuxDesktop) setLinuxShareOpen(true)
+      else await startScreenShare(room)
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Escolha uma tela ou janela e permita o acesso para transmitir.'
       setMessage(detail, 'error')
@@ -1318,11 +1333,12 @@ function App() {
       if (localAudioTrack) await room.localParticipant.unpublishTrack(localAudioTrack, true)
       localScreenTrackRef.current = null
       localScreenAudioTrackRef.current = null
-      if (window.chriscordDesktop) {
+      if (window.chriscordDesktop && !isLinuxDesktop) {
         const sources = await window.chriscordDesktop.getShareSources()
         if (!sources.length) throw new Error('O Windows não encontrou telas ou janelas para compartilhar.')
         setShareSources(sources)
-      } else await startScreenShare(room)
+      } else if (isLinuxDesktop) setLinuxShareOpen(true)
+      else await startScreenShare(room)
     } catch { setMessage('A troca foi cancelada. Sua transmissão foi encerrada.') }
   }
 
@@ -1558,7 +1574,7 @@ function App() {
       const copied = window.chriscordDesktop
         ? await window.chriscordDesktop.writeClipboard(diagnosticText)
         : await navigator.clipboard.writeText(diagnosticText).then(() => true)
-      if (!copied) throw new Error('O Windows não permitiu copiar o texto.')
+      if (!copied) throw new Error(`${systemText.The} não permitiu copiar o texto.`)
       setDiagnosticCopyMessage('Copiado para a área de transferência.')
     } catch { setDiagnosticCopyMessage('Não foi possível copiar automaticamente. Selecione o texto e copie manualmente.') }
   }
@@ -1713,7 +1729,22 @@ function App() {
       }
       if (kind === 'audioinput') setMicrophoneDevice(deviceId)
       else setSpeakerDevice(deviceId)
-    } catch { setMessage('O Windows não permitiu trocar esse dispositivo de áudio.', 'error') }
+    } catch { setMessage(`${systemText.The} não permitiu trocar esse dispositivo de áudio.`, 'error') }
+  }
+
+  async function startLinuxShare(audioMode: ShareAudioMode, audioSourceIds: string[]) {
+    setLinuxShareOpen(false)
+    const room = roomRef.current
+    if (!room || shareStartPendingRef.current) return
+    shareStartPendingRef.current = true
+    try {
+      await startScreenShareFromSource(room, '', audioSourceIds, audioMode)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'A tela escolhida não foi confirmada.'
+      const cancelled = detail === 'A escolha de tela foi cancelada.'
+      setMessage(detail, cancelled ? 'info' : 'error')
+      if (!cancelled) recordSafeEvent('error', `Falha ao capturar a tela escolhida: ${detail}`)
+    } finally { shareStartPendingRef.current = false }
   }
 
   async function chooseShareSource(sourceId: string | null, audioSourceIds: string[] = [], audioMode: ShareAudioMode = shareAudioMode) {
@@ -1734,7 +1765,7 @@ function App() {
     try {
       await startScreenShareFromSource(room, sourceId, audioSourceIds, audioMode)
     } catch (error) {
-      const detail = error instanceof Error ? error.message : 'O Windows não confirmou a tela escolhida.'
+      const detail = error instanceof Error ? error.message : `${systemText.The} não confirmou a tela escolhida.`
       setMessage(detail, 'error')
       recordSafeEvent('error', `Falha ao capturar a tela escolhida: ${detail}`)
     } finally { shareStartPendingRef.current = false }
@@ -1794,7 +1825,7 @@ function App() {
             </section>
             <section className="settings-section voice-shortcut-settings"><strong>Atalho de voz</strong><p>Funciona com o Barracord em foco. A tecla nunca é capturada enquanto você está digitando no chat.</p><label>Modo<select value={voiceKeyMode} onChange={(event) => void changeVoiceKeyMode(event.target.value as 'off' | 'push-to-talk' | 'push-to-mute')}><option value="off">Desligado</option><option value="push-to-talk">Apertar para falar</option><option value="push-to-mute">Apertar para mutar</option></select></label><label>Tecla<select value={voiceShortcut} onChange={(event) => setVoiceShortcut(event.target.value)} disabled={voiceKeyMode === 'off'}><option value="Space">Espaço</option><option value="KeyV">V</option><option value="KeyC">C</option><option value="CapsLock">Caps Lock</option></select></label>{voiceKeyMode !== 'off' && <div className="voice-shortcut-preview"><kbd>{voiceShortcutLabel}</kbd><span>{voiceKeyMode === 'push-to-talk' ? 'Segure para falar' : 'Segure para mutar'}</span></div>}</section>
           </>}
-          {settingsTab === 'stream' && <section className="settings-section settings-streaming"><strong>Qualidade da próxima transmissão</strong><p>O perfil define os limites de captura e envio; a resolução e a fluidez podem variar conforme a janela e a conexão. Alterações valem para a próxima transmissão.</p><div className="quality-options">{qualityPresets.map((preset) => <button key={preset.id} className={qualityProfile === preset.id ? 'selected' : ''} type="button" onClick={() => setQualityProfile(preset.id)}><b>{preset.label}</b><span>{preset.detail}</span></button>)}</div><div className="settings-help-card"><strong>Som da transmissão</strong><p>{window.chriscordDesktop ? 'No Windows, marque os aplicativos de áudio ao compartilhar. A captura isolada é experimental. Sistema inteiro inclui todos os sons, inclusive outras calls.' : 'A captura isolada por aplicativo está disponível no cliente Windows. No navegador, as opções de áudio dependem do seletor de compartilhamento.'} O microfone é controlado separadamente.</p></div></section>}
+          {settingsTab === 'stream' && <section className="settings-section settings-streaming"><strong>Qualidade da próxima transmissão</strong><p>O perfil define os limites de captura e envio; a resolução e a fluidez podem variar conforme a janela e a conexão. Alterações valem para a próxima transmissão.</p><div className="quality-options">{qualityPresets.map((preset) => <button key={preset.id} className={qualityProfile === preset.id ? 'selected' : ''} type="button" onClick={() => setQualityProfile(preset.id)}><b>{preset.label}</b><span>{preset.detail}</span></button>)}</div><div className="settings-help-card"><strong>Som da transmissão</strong><p>{isLinuxDesktop ? 'No Linux, escolha ao compartilhar os aplicativos que estão tocando som, ou todo o som do computador. A call do Barracord nunca entra na transmissão.' : window.chriscordDesktop ? 'No Windows, marque os aplicativos de áudio ao compartilhar. A captura isolada é experimental. Sistema inteiro inclui todos os sons, inclusive outras calls.' : 'A captura isolada por aplicativo está disponível no cliente Windows. No navegador, as opções de áudio dependem do seletor de compartilhamento.'} O microfone é controlado separadamente.</p></div></section>}
           {settingsTab === 'stream' && <section className="settings-section"><strong>Ao assistir</strong><label>Quando alguém iniciar uma transmissão<select value={streamStartPreference} onChange={(event) => setStreamStartPreference(event.target.value as 'notice' | 'open' | 'none')}><option value="notice">Mostrar aviso para eu escolher assistir</option><option value="open">Abrir automaticamente</option><option value="none">Não abrir nem avisar automaticamente</option></select></label><p>Esta preferência controla a recepção das transmissões dos outros e é salva neste computador.</p></section>}
           {settingsTab === 'barraca' && isHostApp && <section className="settings-section host-availability-setting"><strong>Barraca neste computador</strong><p>Quando o Barracord Anfitrião abrir, deixe a Barraca pronta para a galera. Fechar o app ainda encerra a Barraca.</p><label><input type="checkbox" checked={keepBarracaAvailable} onChange={(event) => setKeepBarracaAvailable(event.target.checked)} /> Manter a Barraca disponível ao abrir</label></section>}
         </div>
@@ -1923,7 +1954,7 @@ function App() {
                 <div><header><strong>{chat.installationId === getInstallationId() ? 'Você' : chat.author}</strong><time>{new Date(chat.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</time><button type="button" className="copy-chat-message" onClick={() => void copyChatMessage(chat)}>{copiedChatMessageId === chat.id ? 'Copiado' : 'Copiar'}</button></header><p><ChatMessageBody body={chat.body} /></p></div>
               </article>) : <p className="text-chat-empty">Esse canal ainda está quieto. Manda o primeiro salve.</p>}
             </div>
-            <form className="text-composer" onSubmit={sendTextMessage}><input value={textDraft} onChange={(event) => setTextDraft(event.target.value)} maxLength={1_000} disabled={barracaAccess !== 'available'} placeholder={barracaAccess === 'available' ? `Conversar em #${selectedTextChannel}` : 'Aguardando conexão com a Barraca…'} aria-label={`Conversar em #${selectedTextChannel}. Emojis: use Windows e ponto`} /><span className="emoji-hint" title="No Windows, pressione Windows + . para abrir os emojis">☺</span><button type="submit" disabled={!textDraft.trim() || barracaAccess !== 'available'} title="Enviar mensagem">Enviar <span>↑</span></button></form>
+            <form className="text-composer" onSubmit={sendTextMessage}><input value={textDraft} onChange={(event) => setTextDraft(event.target.value)} maxLength={1_000} disabled={barracaAccess !== 'available'} placeholder={barracaAccess === 'available' ? `Conversar em #${selectedTextChannel}` : 'Aguardando conexão com a Barraca…'} aria-label={`Conversar em #${selectedTextChannel}. Emojis: ${systemText.emojiKeys}`} /><span className="emoji-hint" title={systemText.emojiHint}>☺</span><button type="submit" disabled={!textDraft.trim() || barracaAccess !== 'available'} title="Enviar mensagem">Enviar <span>↑</span></button></form>
           </div>
         </>}
         {isSharing && screenAudioWarning && <div className="stream-audio-notice" role="status">{screenAudioWarning}</div>}
@@ -1954,6 +1985,7 @@ function App() {
     {connected && voiceShortcutPressed && <div className={`voice-shortcut-active ${voiceKeyMode}`} role="status"><span><ControlIcon name={voiceKeyMode === 'push-to-talk' ? 'microphone' : 'microphoneOff'} /></span><div><small>{voiceShortcutLabel}</small><strong>{voiceKeyMode === 'push-to-talk' ? 'VOCÊ ESTÁ FALANDO' : 'MICROFONE MUTADO'}</strong></div></div>}
     <div ref={remoteAudioRef} className="remote-audio-frame" aria-hidden="true" />
 
+    {linuxShareOpen && <LinuxSharePicker audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => { setLinuxShareOpen(false); setMessage('A escolha de tela foi cancelada.') }} onStart={(mode, ids) => void startLinuxShare(mode, ids)} />}
     {shareSources && <SharePicker sources={shareSources} audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => void chooseShareSource(null)} onStart={(sourceId, audioSourceIds, mode) => void chooseShareSource(sourceId, audioSourceIds, mode)} onRefresh={async () => {
       const sources = await window.chriscordDesktop!.getShareSources()
       setShareSources((current) => current === null ? null : sources)
@@ -1969,7 +2001,7 @@ function App() {
       <div className="join-brand"><span className="brand-symbol">B</span><div><small>BEM-VINDO À</small><strong>BARRACORD</strong></div></div>
       <h1>{window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' ? <>Prepare seu acesso<br /><em>à Barraca.</em></> : <>A turma está<br /><em>na Barraca.</em></>}</h1>
       {window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' && <><label>Seu nome<input value={participantName} onChange={(event) => setParticipantName(event.target.value)} placeholder="Como a galera te chama?" autoFocus /></label><label>Código de ativação<input value={invite} onChange={(event) => setInvite(event.target.value.trim())} placeholder="BARRACA1.…" type="text" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label></>}
-      {window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' ? <section className="private-network-setup"><span className="network-setup-icon">⌁</span><div><small>REDE DA BARRACA</small><strong>{tailscaleStatus === 'missing' ? 'Vamos instalar a conexão privada.' : tailscaleStatus === 'offline' ? 'Vamos conectar este computador.' : tailscaleStatus === 'needs-attention' ? 'A conexão privada precisa de atenção.' : 'Vamos conferir sua conexão privada.'}</strong></div><p>O Barracord usa o código de ativação para conectar este PC. O Windows pode pedir uma única confirmação de administrador; não é preciso criar nem acessar uma conta Tailscale.</p><div className="private-network-actions"><button type="button" onClick={() => void preparePrivateNetwork()} disabled={privateNetworkAction || privateNetworkChecking || !invite.trim() || tailscaleStatus === 'needs-attention'}>{privateNetworkAction ? 'Preparando…' : tailscaleStatus === 'needs-attention' ? 'Verifique a conexão' : 'Instalar e conectar'}</button><button className="secondary" type="button" onClick={() => void refreshPrivateNetworkStatus(tailscaleStatus === 'needs-attention' || tailscaleStatus === 'offline')} disabled={privateNetworkAction || privateNetworkChecking}>{privateNetworkChecking ? 'Verificando…' : tailscaleStatus === 'needs-attention' || tailscaleStatus === 'offline' ? 'Confirmar com Windows' : 'Verificar novamente'}</button></div>{privateNetworkMessage && <em>{privateNetworkMessage}</em>}</section> : <><p>Use a ativação que recebeu para autorizar este computador uma única vez.</p><label>Seu nome<input value={participantName} onChange={(event) => setParticipantName(event.target.value)} placeholder="Como a galera te chama?" autoFocus /></label><label>Código de ativação<input value={invite} onChange={(event) => setInvite(event.target.value.trim())} placeholder="BARRACA1.…" type="text" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label>{isDevelopment ? <details><summary>Configuração avançada</summary><label>Servidor<input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} /></label><label>Convites<input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} /></label></details> : <p className="private-setup"><i /> Conexão privada pronta.</p>}</>}
+      {window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' ? <section className="private-network-setup"><span className="network-setup-icon">⌁</span><div><small>REDE DA BARRACA</small><strong>{tailscaleStatus === 'missing' ? 'Vamos instalar a conexão privada.' : tailscaleStatus === 'offline' ? 'Vamos conectar este computador.' : tailscaleStatus === 'needs-attention' ? 'A conexão privada precisa de atenção.' : 'Vamos conferir sua conexão privada.'}</strong></div><p>O Barracord usa o código de ativação para conectar este PC. {systemText.The} pode pedir uma única confirmação de administrador; não é preciso criar nem acessar uma conta Tailscale.</p><div className="private-network-actions"><button type="button" onClick={() => void preparePrivateNetwork()} disabled={privateNetworkAction || privateNetworkChecking || !invite.trim() || tailscaleStatus === 'needs-attention'}>{privateNetworkAction ? 'Preparando…' : tailscaleStatus === 'needs-attention' ? 'Verifique a conexão' : 'Instalar e conectar'}</button><button className="secondary" type="button" onClick={() => void refreshPrivateNetworkStatus(tailscaleStatus === 'needs-attention' || tailscaleStatus === 'offline')} disabled={privateNetworkAction || privateNetworkChecking}>{privateNetworkChecking ? 'Verificando…' : tailscaleStatus === 'needs-attention' || tailscaleStatus === 'offline' ? systemText.confirm : 'Verificar novamente'}</button></div>{privateNetworkMessage && <em>{privateNetworkMessage}</em>}</section> : <><p>Use a ativação que recebeu para autorizar este computador uma única vez.</p><label>Seu nome<input value={participantName} onChange={(event) => setParticipantName(event.target.value)} placeholder="Como a galera te chama?" autoFocus /></label><label>Código de ativação<input value={invite} onChange={(event) => setInvite(event.target.value.trim())} placeholder="BARRACA1.…" type="text" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label>{isDevelopment ? <details><summary>Configuração avançada</summary><label>Servidor<input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} /></label><label>Convites<input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} /></label></details> : <p className="private-setup"><i /> Conexão privada pronta.</p>}</>}
       {isDevelopment && hostControl}
       {isDevelopment && tailscaleStatus && tailscaleStatus !== 'ready' && <p className="network-note">{tailscaleStatus === 'missing' ? 'A conexão privada ainda não está instalada neste PC.' : 'Conecte a rede privada antes de entrar na sala.'}</p>}
       <p className="join-feedback">{message}</p>

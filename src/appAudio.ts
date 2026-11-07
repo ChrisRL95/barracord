@@ -1,3 +1,5 @@
+import { systemText } from './platformText'
+
 export type AppAudioCapture = { track: MediaStreamTrack; stop: () => void }
 
 export async function captureAppAudio(sourceIds: string[], onEnded: (message: string) => void): Promise<AppAudioCapture> {
@@ -30,7 +32,7 @@ export async function captureAppAudio(sourceIds: string[], onEnded: (message: st
     track = destination.stream.getAudioTracks()[0]
     if (!track) throw new Error('Não foi possível criar a trilha de áudio do aplicativo.')
     await context.resume()
-    if (context.state !== 'running') throw new Error('O Windows não liberou a reprodução de áudio isolado.')
+    if (context.state !== 'running') throw new Error(`${systemText.The} não liberou a reprodução de áudio isolado.`)
     removePcm = desktop.onAppAudioPcm((payload) => {
       if (stopped || payload.id !== id) return
       const pcm = new Uint8Array(payload.pcm)

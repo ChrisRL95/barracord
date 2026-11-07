@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('chriscordDesktop', {
   getShareSources: () => ipcRenderer.invoke('share:sources'),
   startAppAudio: (sourceIds) => ipcRenderer.invoke('app-audio:start', sourceIds),
   stopAppAudio: (id) => ipcRenderer.invoke('app-audio:stop', id),
+  listAudioApplications: () => ipcRenderer.invoke('app-audio:list'),
   onAppAudioPcm: (callback) => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('app-audio:pcm', listener)
@@ -46,4 +47,5 @@ contextBridge.exposeInMainWorld('chriscordDesktop', {
     return () => ipcRenderer.removeListener('share:request', listener)
   },
   isDesktop: true,
+  platform: process.platform,
 })

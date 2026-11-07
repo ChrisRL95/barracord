@@ -6,6 +6,7 @@
   "version": "0.1.0-beta.19",
   "type": "module",
   "main": "electron/main.cjs",
+  "desktopName": "barracord.desktop",
   "scripts": {
     "audio:build": "node scripts/build-app-audio.cjs",
     "dev": "vite",
@@ -17,7 +18,9 @@
     "desktop:dev": "concurrently -k \"npm run dev -- --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "desktop:tailnet:test": "npm run build:tailnet && set BARRACORD_USE_DIST=1&& electron .",
     "desktop:guest:test": "npm run build:tailnet && set BARRACORD_USE_DIST=1&& set BARRACORD_ROLE=guest&& electron .",
+    "desktop:guest:linux:test": "npm run build:tailnet && BARRACORD_USE_DIST=1 BARRACORD_ROLE=guest electron .",
     "desktop:build:guest": "npm run audio:build && npm run build:tailnet && electron-builder --win nsis --config electron-builder.guest.json --config.directories.output=\"%TEMP%\\barracord-guest-release\"",
+    "desktop:build:guest:linux": "npm run build:tailnet && electron-builder --linux --config electron-builder.guest.json --config.directories.output=release/guest-linux",
     "desktop:build:host": "npm run audio:build && npm run build:tailnet && electron-builder --win nsis --config electron-builder.host.json --config.directories.output=\"%TEMP%\\barracord-host-release\"",
     "desktop:build": "npm run desktop:build:host",
     "lint": "oxlint",
