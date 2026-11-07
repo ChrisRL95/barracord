@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } from 'livekit-client'
+import type { Participant } from 'livekit-client'
 import { captureAppAudio } from './appAudio'
 import type { AppAudioCapture } from './appAudio'
 import SharePicker from './SharePicker'
 import LinuxSharePicker from './LinuxSharePicker'
 import { isLinuxDesktop, systemText } from './platformText'
 import Soundboard from './Soundboard'
+import VoiceChannelMembers from './VoiceChannelMembers'
+import type { VoicePerson } from './VoiceChannelMembers'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
 import { MicrophoneController, configureMicrophoneNoise, loadNoiseMode, microphoneCaptureOptions, noiseModeLabels } from './noiseSuppression'
@@ -194,6 +197,11 @@ function App() {
   const [editingChannelName, setEditingChannelName] = useState('')
   const [channelPresence, setChannelPresence] = useState<ChannelPresence>({})
   const [presenceMembers, setPresenceMembers] = useState<PresenceMember[]>([])
+  const presenceJsonRef = useRef({ channels: '', members: '' })
+  // People in the channel this app is connected to, straight from the LiveKit
+  // room: it reports joins and leaves long before the host's presence does.
+  const [roomParticipants, setRoomParticipants] = useState<VoicePerson[]>([])
+  const [joiningVoiceChannel, setJoiningVoiceChannel] = useState<string | null>(null)
   const [textMessages, setTextMessages] = useState<TextMessage[]>([])
   const [textDraft, setTextDraft] = useState('')
   const [copiedChatMessageId, setCopiedChatMessageId] = useState('')
@@ -522,29 +530,85 @@ function App() {
     }
   }, [])
 
+  function applyPresence(body: { channels?: ChannelPresence; members?: PresenceMember[] }) {
+    // Skip identical snapshots so the whole app doesn't re-render for nothing.
+    if (body.channels) {
+      const json = JSON.stringify(body.channels)
+      if (json !== presenceJsonRef.current.channels) { presenceJsonRef.current.channels = json; setChannelPresence(body.channels) }
+    }
+    if (body.members) {
+      const json = JSON.stringify(body.members)
+      if (json !== presenceJsonRef.current.members) { presenceJsonRef.current.members = json; setPresenceMembers(body.members) }
+    }
+  }
+  const applyPresenceRef = useRef(applyPresence)
+  applyPresenceRef.current = applyPresence
+
   useEffect(() => {
     if (!authorizedInstallation) return
     let cancelled = false
-    const refreshPresence = async () => {
+    let stream: EventSource | null = null
+    let streamLive = false
+    let streamRetry: number | null = null
+    let heartbeatTimer: number | null = null
+    const presenceEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence')
+    const installationId = getInstallationId()
+
+    // The heartbeat keeps this computer "online". While the live stream is up
+    // it only needs to beat every 15 s; without it (older host, network hiccup)
+    // it falls back to polling every 4 s and reads presence from the reply.
+    const heartbeat = async () => {
       try {
-        const presenceEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence')
-        const installationId = getInstallationId()
         const away = document.hidden || Date.now() - lastActivityRef.current >= 5 * 60_000
-        const heartbeat = await fetch(`${presenceEndpoint}/heartbeat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ installationId, away }) })
-        if (heartbeat.status === 401) { if (!cancelled) returnToActivation(); return }
-        const response = await fetch(`${presenceEndpoint}?${new URLSearchParams({ installationId }).toString()}`, { cache: 'no-store' })
+        const response = await fetch(`${presenceEndpoint}/heartbeat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ installationId, away }) })
         if (response.status === 401) { if (!cancelled) returnToActivation(); return }
-        if (!response.ok || cancelled) return
+        if (!response.ok || cancelled || streamLive) return
         const body = await response.json() as { channels?: ChannelPresence; members?: PresenceMember[] }
-        if (body.channels && !cancelled) setChannelPresence(body.channels)
-        if (body.members && !cancelled) setPresenceMembers(body.members)
+        if (body.channels) { applyPresenceRef.current(body); return }
+        // Hosts without the merged heartbeat still answer on GET /presence.
+        const presence = await fetch(`${presenceEndpoint}?${new URLSearchParams({ installationId }).toString()}`, { cache: 'no-store' })
+        if (presence.status === 401) { if (!cancelled) returnToActivation(); return }
+        if (presence.ok && !cancelled && !streamLive) applyPresenceRef.current(await presence.json() as { channels?: ChannelPresence; members?: PresenceMember[] })
       } catch {
         // Presence is optional; the room itself still reports connection errors.
+      } finally {
+        if (!cancelled) heartbeatTimer = window.setTimeout(() => void heartbeat(), streamLive ? 15_000 : 4_000)
       }
     }
-    const start = window.setTimeout(() => void refreshPresence(), 0)
-    const interval = window.setInterval(() => void refreshPresence(), 4_000)
-    return () => { cancelled = true; window.clearTimeout(start); window.clearInterval(interval) }
+    const beatNow = () => {
+      if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer)
+      heartbeatTimer = window.setTimeout(() => void heartbeat(), 0)
+    }
+
+    const openStream = () => {
+      if (cancelled || typeof EventSource === 'undefined') return
+      stream = new EventSource(`${presenceEndpoint}/stream?${new URLSearchParams({ installationId }).toString()}`)
+      stream.addEventListener('presence', (event) => {
+        streamLive = true
+        try { applyPresenceRef.current(JSON.parse((event as MessageEvent<string>).data) as { channels?: ChannelPresence; members?: PresenceMember[] }) } catch { /* ignore a malformed update */ }
+      })
+      stream.addEventListener('error', () => {
+        if (!streamLive && stream?.readyState !== EventSource.CLOSED) return
+        const wasLive = streamLive
+        streamLive = false
+        if (wasLive) beatNow()
+        // The browser retries on its own after a drop; a refused stream (older
+        // host, 401) closes for good, so try again later.
+        if (stream?.readyState === EventSource.CLOSED) {
+          stream = null
+          streamRetry = window.setTimeout(() => { streamRetry = null; openStream() }, 30_000)
+        }
+      })
+    }
+
+    beatNow()
+    openStream()
+    return () => {
+      cancelled = true
+      stream?.close()
+      if (streamRetry !== null) window.clearTimeout(streamRetry)
+      if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer)
+    }
   }, [authorizedInstallation, tokenEndpoint])
 
   useEffect(() => {
@@ -664,8 +728,19 @@ function App() {
     } catch { setMessage(`Não foi possível alterar a inicialização com ${systemText.the}.`) }
   }
 
+  function syncRoomParticipants(room: Room) {
+    if (roomRef.current !== room && room.state !== 'connected') return
+    const people: Participant[] = [room.localParticipant, ...room.remoteParticipants.values()]
+    const list = people
+      .slice()
+      .sort((a, b) => (a.joinedAt?.getTime() ?? 0) - (b.joinedAt?.getTime() ?? 0))
+      .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))
+    setRoomParticipants(list)
+  }
+
   function resetRoom(messageText: string) {
     microphoneControllerRef.current?.dispose()
+    setRoomParticipants([])
     microphoneControllerRef.current = null
     setConnected(false)
     setCallPing(null)
@@ -700,6 +775,7 @@ function App() {
     }
     stopMicrophoneTest()
     setIsConnecting(true)
+    setJoiningVoiceChannel(targetRoom)
     setMessage('Abrindo a Barraca…')
     try {
       const tokenResponse = await fetch(tokenEndpoint.trim(), {
@@ -743,7 +819,10 @@ function App() {
       room.on(RoomEvent.ParticipantConnected, (participant) => {
         const name = participant.name || participant.identity
         setMessage(`${name} chegou na sala.`)
+        syncRoomParticipants(room)
       })
+      room.on(RoomEvent.ParticipantDisconnected, () => syncRoomParticipants(room))
+      room.on(RoomEvent.ParticipantNameChanged, () => syncRoomParticipants(room))
       room.on(RoomEvent.ActiveSpeakersChanged, (activeSpeakers) => {
         setSpeakingIdentities(activeSpeakers.map((participant) => participant.identity))
       })
@@ -848,6 +927,7 @@ function App() {
         } catch { setMessage(`Você entrou, mas ${systemText.the} bloqueou o microfone.`, 'warning') }
       }
       roomRef.current = room
+      syncRoomParticipants(room)
       setRoomName(targetRoom)
       setActiveVoiceChannel(targetRoom)
       setStageView('voice')
@@ -869,7 +949,10 @@ function App() {
       setMessage(`Não foi possível entrar: ${error instanceof Error ? error.message : 'verifique a conexão.'}`, 'error')
       recordSafeEvent('error', isReconnect ? 'Uma tentativa de reconexão com a call falhou.' : 'Não foi possível entrar na call.')
       return false
-    } finally { setIsConnecting(false) }
+    } finally {
+      setIsConnecting(false)
+      setJoiningVoiceChannel(null)
+    }
   }
 
   async function authorizeInstallation(event: FormEvent) {
@@ -1858,9 +1941,28 @@ function App() {
   const textChannels = channelCatalog.text
   const voiceChannels = channelCatalog.voice.map((channel) => ({ ...channel, icon: channel.id === 'afk' ? '◌' : '◉' }))
   const voiceChannelName = voiceChannels.find((channel) => channel.id === activeVoiceChannel)?.name
-  const onlineVoiceCount = Object.values(channelPresence).reduce((total, people) => total + people.length, 0)
-  const fallbackMembers: PresenceMember[] = Object.entries(channelPresence).flatMap(([channelId, people]) => people.map((person) => ({ installationId: person.identity, name: person.name, status: 'em-call' as const, channelId })))
-  const directoryMembers = presenceMembers.length ? presenceMembers : fallbackMembers
+  // The host's presence lags a little behind reality. This app knows its own
+  // call state and, while connected, the exact list of its channel, so it
+  // overrides the host snapshot with that.
+  const selfIdentity = getInstallationId()
+  const selfName = participantName.trim() || 'Você'
+  const liveRoom = connected && !isReconnecting && activeVoiceChannel ? activeVoiceChannel : null
+  const visibleChannelPresence: Record<string, VoicePerson[]> = Object.fromEntries(voiceChannels.map((channel) => {
+    if (channel.id === liveRoom && roomParticipants.length) return [channel.id, roomParticipants]
+    const people: VoicePerson[] = (channelPresence[channel.id] ?? []).filter((person) => person.identity !== selfIdentity)
+    if (channel.id === activeVoiceChannel && connected) return [channel.id, [...people, { identity: selfIdentity, name: selfName }]]
+    if (channel.id === joiningVoiceChannel && !connected) return [channel.id, [...people, { identity: selfIdentity, name: selfName, joining: true }]]
+    return [channel.id, people]
+  }))
+  const onlineVoiceCount = Object.values(visibleChannelPresence).reduce((total, people) => total + people.filter((person) => !person.joining).length, 0)
+  const fallbackMembers: PresenceMember[] = Object.entries(visibleChannelPresence).flatMap(([channelId, people]) => people.filter((person) => !person.joining).map((person) => ({ installationId: person.identity, name: person.name, status: 'em-call' as const, channelId })))
+  const selfCallStatus: Pick<PresenceMember, 'status' | 'channelId'> | null = connected && activeVoiceChannel ? { status: isSharing ? 'streaming' : 'em-call', channelId: activeVoiceChannel } : null
+  const directoryMembers = presenceMembers.length ? presenceMembers.map((member) => {
+    if (member.installationId !== selfIdentity) return member
+    if (selfCallStatus) return { ...member, ...selfCallStatus }
+    if (member.status === 'em-call' || member.status === 'streaming') return { ...member, status: 'online' as const, channelId: null }
+    return member
+  }) : fallbackMembers
   const memberGroups = (['streaming', 'em-call', 'online', 'away', 'offline'] as const).map((status) => ({ status, members: directoryMembers.filter((member) => member.status === status).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')) })).filter((group) => group.members.length)
   const estimatedUploadMbps = adminData?.metrics?.estimatedUploadMbps ?? 0
   const uploadLoad = estimatedUploadMbps / hostUploadLimit
@@ -1897,14 +1999,11 @@ function App() {
           {textChannels.map((channel) => <button key={channel.id} className={`room-pill ${selectedTextChannel === channel.id && stageView === 'text' ? 'active' : ''}`} type="button" onClick={() => { setSelectedTextChannel(channel.id); setStageView('text') }}><span>#</span>{channel.name}</button>)}
           <div className="nav-label voice-nav-label">CANAIS DE VOZ</div>
           {voiceChannels.map((channel) => {
-            const people = channelPresence[channel.id] ?? []
+            const people = visibleChannelPresence[channel.id] ?? []
             const active = activeVoiceChannel === channel.id && stageView === 'voice'
             return <section className={`voice-channel-entry ${active ? 'active' : ''}`} key={channel.id}>
-              <button className={`room-pill voice-pill ${active ? 'active' : ''}`} type="button" onClick={() => requestVoiceChannel(channel.id)} disabled={isConnecting || barracaAccess !== 'available'} title={people.map((person) => person.name).join(', ')}><span>◉</span>{channel.name}<b>{activeVoiceChannel === channel.id ? 'na call' : people.length || ''}</b></button>
-              {people.length > 0 && <div className="voice-channel-members" aria-label={`Pessoas em ${channel.name}`}>{people.map((person) => {
-                const speaking = activeVoiceChannel === channel.id && speakingIdentities.includes(person.identity)
-                return <div className={`voice-channel-member ${person.identity === getInstallationId() ? 'self' : ''} ${speaking ? 'speaking' : ''}`} key={person.identity} aria-label={`${person.name}${speaking ? ', falando' : ''}`}><span className={`voice-channel-avatar ${avatarTone(person.identity)}`}>{person.name.slice(0, 1).toUpperCase()}</span><strong>{person.name}{person.identity === getInstallationId() && <small> você</small>}</strong>{speaking && <span className="voice-speaking-indicator" aria-hidden="true">▂▅▃</span>}</div>
-              })}</div>}
+              <button className={`room-pill voice-pill ${active ? 'active' : ''}`} type="button" onClick={() => requestVoiceChannel(channel.id)} disabled={isConnecting || barracaAccess !== 'available'} title={people.map((person) => person.name).join(', ')}><span>◉</span>{channel.name}<b>{activeVoiceChannel === channel.id ? 'na call' : joiningVoiceChannel === channel.id ? 'entrando…' : people.length || ''}</b></button>
+              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} avatarTone={avatarTone} />
             </section>
           })}
         </div>

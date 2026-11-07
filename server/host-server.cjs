@@ -1,7 +1,7 @@
 const dotenv = require('dotenv')
 const cors = require('cors')
 const express = require('express')
-const { AccessToken, RoomServiceClient } = require('livekit-server-sdk')
+const { AccessToken, RoomServiceClient, WebhookReceiver } = require('livekit-server-sdk')
 const { mkdirSync, readFileSync, writeFileSync } = require('node:fs')
 const path = require('node:path')
 const { createTailscaleProvisioner } = require('./tailscale-provisioning.cjs')
@@ -60,6 +60,7 @@ function saveInvites() {
 function saveMembers() {
   mkdirSync(path.dirname(membersFile), { recursive: true })
   writeFileSync(membersFile, JSON.stringify(members, null, 2), 'utf8')
+  void schedulePresenceRefresh()
 }
 function saveMessages() {
   mkdirSync(path.dirname(messagesFile), { recursive: true })
@@ -68,6 +69,7 @@ function saveMessages() {
 function saveChannels() {
   mkdirSync(path.dirname(channelsFile), { recursive: true })
   writeFileSync(channelsFile, JSON.stringify(channels, null, 2), 'utf8')
+  void schedulePresenceRefresh()
 }
 function normalizeInvite(value) { return typeof value === 'string' ? value.trim().toUpperCase() : '' }
 function newInviteCode() {
@@ -144,7 +146,10 @@ app.get('/health', async (_request, response) => {
 })
 
 function rememberMemberHeartbeat(installationId, away = false) {
+  const previous = memberHeartbeats.get(installationId)
   memberHeartbeats.set(installationId, { lastSeen: Date.now(), away: Boolean(away) })
+  // Só vale avisar os outros quando o status visível muda (voltou, ficou ausente).
+  if (!previous || previous.away !== Boolean(away) || Date.now() - previous.lastSeen >= 45_000) schedulePresenceRefresh()
 }
 
 function activeMemberStatus(installationId, callsByInstallation) {
@@ -155,31 +160,112 @@ function activeMemberStatus(installationId, callsByInstallation) {
   return { status: heartbeat.away ? 'away' : 'online', channelId: null }
 }
 
-app.post('/presence/heartbeat', (request, response) => {
+// Presença ao vivo: uma única leitura do LiveKit é compartilhada por todos os
+// clientes. O webhook do LiveKit pede uma nova leitura assim que alguém entra,
+// sai ou começa a transmitir, e o resultado vai para todos pelo /presence/stream.
+const presenceSubscribers = new Set()
+const presenceSafetyIntervalMs = 5_000
+let presenceSnapshot = null
+let presenceSnapshotJson = ''
+let presenceRefreshRunning = null
+let presenceRefreshQueued = false
+
+async function readPresence() {
+  const presence = await Promise.all(channels.voice.map(async (channel) => {
+    const participants = await roomService.listParticipants(channel.id)
+    return [channel.id, participants]
+  }))
+  const channelsPresence = Object.fromEntries(presence.map(([channelId, participants]) => [channelId, participants
+    .slice()
+    .sort((a, b) => Number(a.joinedAt ?? 0) - Number(b.joinedAt ?? 0))
+    .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))]))
+  const callsByInstallation = new Map()
+  presence.forEach(([channelId, participants]) => participants.forEach((participant) => callsByInstallation.set(participant.identity, {
+    channelId,
+    streaming: participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'),
+  })))
+  const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, ...activeMemberStatus(installationId, callsByInstallation) }))
+  return { channels: channelsPresence, members: memberList }
+}
+
+function sendPresence(response, json) {
+  response.write(`event: presence\ndata: ${json}\n\n`)
+}
+
+async function refreshPresence() {
+  const snapshot = await readPresence()
+  const json = JSON.stringify(snapshot)
+  presenceSnapshot = snapshot
+  if (json === presenceSnapshotJson) return snapshot
+  presenceSnapshotJson = json
+  presenceSubscribers.forEach((subscriber) => sendPresence(subscriber, json))
+  return snapshot
+}
+
+// Junta pedidos simultâneos: enquanto uma leitura roda, no máximo mais uma fica na fila.
+function schedulePresenceRefresh() {
+  if (presenceRefreshRunning) {
+    presenceRefreshQueued = true
+    return presenceRefreshRunning
+  }
+  presenceRefreshRunning = refreshPresence()
+    .catch(() => presenceSnapshot)
+    .finally(() => {
+      presenceRefreshRunning = null
+      if (presenceRefreshQueued) {
+        presenceRefreshQueued = false
+        void schedulePresenceRefresh()
+      }
+    })
+  return presenceRefreshRunning
+}
+
+// Rede de segurança para eventos perdidos e para quem some sem avisar (heartbeat vencido).
+setInterval(() => {
+  if (presenceSubscribers.size) void schedulePresenceRefresh()
+}, presenceSafetyIntervalMs).unref()
+
+const webhookReceiver = new WebhookReceiver(apiKey, apiSecret)
+app.post('/livekit/webhook', express.raw({ type: 'application/webhook+json', limit: '64kb' }), async (request, response) => {
+  try {
+    await webhookReceiver.receive(request.body.toString('utf8'), request.get('Authorization'))
+  } catch {
+    return response.status(401).end()
+  }
+  void schedulePresenceRefresh()
+  return response.status(200).end()
+})
+
+app.post('/presence/heartbeat', async (request, response) => {
   const installationId = request.body?.installationId
   if (!getAuthorizedMember(installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   rememberMemberHeartbeat(installationId, request.body?.away)
-  return response.json({ ok: true })
+  // Devolver a presença aqui poupa o cliente sem stream de um segundo pedido.
+  const snapshot = presenceSnapshot && presenceSubscribers.size ? presenceSnapshot : await schedulePresenceRefresh()
+  return response.json(snapshot ? { ok: true, ...snapshot } : { ok: true })
 })
 
 app.get('/presence', async (request, response) => {
   if (!getAuthorizedMember(request.query.installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
-  try {
-    const presence = await Promise.all(channels.voice.map(async (channel) => {
-      const participants = await roomService.listParticipants(channel.id)
-      return [channel.id, participants]
-    }))
-    const channelsPresence = Object.fromEntries(presence.map(([channelId, participants]) => [channelId, participants.map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))]))
-    const callsByInstallation = new Map()
-    presence.forEach(([channelId, participants]) => participants.forEach((participant) => callsByInstallation.set(participant.identity, {
-      channelId,
-      streaming: participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'),
-    })))
-    const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, ...activeMemberStatus(installationId, callsByInstallation) }))
-    return response.json({ channels: channelsPresence, members: memberList })
-  } catch {
-    return response.status(503).json({ error: 'A Barraca ainda não está pronta.' })
-  }
+  const snapshot = await schedulePresenceRefresh()
+  if (!snapshot) return response.status(503).json({ error: 'A Barraca ainda não está pronta.' })
+  return response.json(snapshot)
+})
+
+app.get('/presence/stream', (request, response) => {
+  if (!getAuthorizedMember(request.query.installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
+  response.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
+  response.flushHeaders()
+  response.write('retry: 2000\n\n')
+  presenceSubscribers.add(response)
+  const keepAlive = setInterval(() => response.write(': ping\n\n'), 20_000)
+  request.on('close', () => {
+    clearInterval(keepAlive)
+    presenceSubscribers.delete(response)
+  })
+  // Sem leitura ainda, a primeira atualização já chega a este assinante pelo broadcast.
+  if (presenceSnapshotJson) sendPresence(response, presenceSnapshotJson)
+  else void schedulePresenceRefresh()
 })
 
 function getAuthorizedMember(installationId) {
