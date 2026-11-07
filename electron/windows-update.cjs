@@ -64,7 +64,7 @@ function registerWindowsUpdate(enabled) {
     }
   })
   setTimeout(() => void check(), 2000).unref()
-  const interval = setInterval(() => void check(), 30 * 60 * 1000)
+  const interval = setInterval(() => void check(), 60_000)
   app.once('before-quit', () => clearInterval(interval))
   interval.unref()
 }

@@ -10,7 +10,7 @@ A partir da beta.20, o instalador NSIS do convidado verifica o canal beta no Git
 
 Para publicar uma nova beta, aumente a versão em `package.json` e no lockfile, gere o instalador convidado e anexe o `.exe`, o `.exe.blockmap` e o `beta.yml` da mesma compilação à pré-release `v<versão>`. Publique os três arquivos juntos para que os clientes encontrem o manifesto e o instalador correspondente.
 
-O atualizador é ativado no convidado Windows empacotado. A versão de anfitrião usa um instalador próprio. A beta.19 precisa receber a beta.20 por instalação manual para começar a verificar as próximas versões.
+O atualizador é ativado no convidado Windows empacotado. A partir da beta.21, a verificação acontece ao abrir o app e a cada minuto enquanto ele estiver aberto. A versão de anfitrião usa um instalador próprio. Quem ainda usa a beta.19 precisa instalar manualmente uma versão com o atualizador.
 
 ## Desenvolvimento
 
