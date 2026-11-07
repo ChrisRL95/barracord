@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 
 export type VoicePerson = { identity: string; name: string; joining?: boolean }
 
@@ -7,7 +8,7 @@ type Props = {
   people: VoicePerson[]
   selfIdentity: string
   speakingIdentities: string[]
-  avatarTone: (identity: string) => string
+  renderAvatar: (person: VoicePerson) => ReactNode
 }
 
 const leaveAnimationMs = 180
@@ -52,7 +53,7 @@ function useLeavingPeople(people: VoicePerson[]): ShownPerson[] {
   return leaving.length ? [...people, ...leaving] : people
 }
 
-export default function VoiceChannelMembers({ channelName, people, selfIdentity, speakingIdentities, avatarTone }: Props) {
+export default function VoiceChannelMembers({ channelName, people, selfIdentity, speakingIdentities, renderAvatar }: Props) {
   const shown = useLeavingPeople(people)
   if (!shown.length) return null
   return <div className="voice-channel-members" aria-label={`Pessoas em ${channelName}`}>{shown.map((person) => {
@@ -60,7 +61,7 @@ export default function VoiceChannelMembers({ channelName, people, selfIdentity,
     const speaking = !person.leaving && speakingIdentities.includes(person.identity)
     const classes = ['voice-channel-member', self && 'self', speaking && 'speaking', person.joining && 'joining', person.leaving && 'leaving'].filter(Boolean).join(' ')
     return <div className={classes} key={person.identity} aria-hidden={person.leaving || undefined} aria-label={`${person.name}${speaking ? ', falando' : ''}${person.joining ? ', entrando' : ''}`}>
-      <span className={`voice-channel-avatar ${avatarTone(person.identity)}`}>{person.name.slice(0, 1).toUpperCase()}</span>
+      {renderAvatar(person)}
       <strong>{person.name}{self && <small> {person.joining ? 'entrando…' : 'você'}</small>}</strong>
       {speaking && <span className="voice-speaking-indicator" aria-hidden="true">▂▅▃</span>}
     </div>
