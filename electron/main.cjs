@@ -15,6 +15,21 @@ const appAudio = process.platform === 'linux' ? createLinuxAudioBridge() : creat
 // The Barracord is a native call client, so playback is expected once the user
 // has explicitly entered a voice channel.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
+// Chromium locks the profile's local storage. A second copy of the app could
+// not open it and would silently start with empty storage: no name, no
+// authorization and a new installation id, which the host then rejects.
+// Keep a single copy per profile and bring its window forward instead. The
+// lock is per profile folder, so the host and guest apps still coexist.
+const isPrimaryInstance = app.requestSingleInstanceLock()
+if (!isPrimaryInstance) app.quit()
+app.on('second-instance', () => {
+  const window = BrowserWindow.getAllWindows()[0]
+  if (!window) return
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+})
 const { promisify } = require('node:util')
 
 const execFileAsync = promisify(execFile)
@@ -730,6 +745,7 @@ ipcMain.handle('share:sources', async (event) => {
 })
 
 app.whenReady().then(() => {
+  if (!isPrimaryInstance) return
   configureMediaPermissions()
   createWindow()
   app.on('activate', () => {
