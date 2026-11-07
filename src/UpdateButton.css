@@ -1,0 +1,41 @@
+.app-header .app-update {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 32px;
+  width: auto;
+  padding-inline: 6px;
+  border: 1px solid #476e5b;
+  border-radius: 8px;
+  background: #1c382c;
+  color: #b9f5cd;
+}
+
+.app-header .app-update:hover { background: #2b503c; }
+.app-header .app-update[aria-disabled="true"] { cursor: default; }
+.app-header .app-update span { font-size: 11px; font-variant-numeric: tabular-nums; }
+.app-header .app-update.available,
+.app-header .app-update.downloading { border-color: #3b4a43; background: transparent; color: #8fb9a0; }
+.app-header .app-update.download-error,
+.app-header .app-update.install-error { color: #ffe0a1; background: #42331f; border-color: #82643f; }
+
+/* Aviso de atualização pronta: mesmo lugar e formato do aviso de recuperação do anfitrião. */
+.app-update-notice { position: fixed; z-index: 71; right: 24px; bottom: 24px; display: flex; width: min(430px, calc(100vw - 32px)); align-items: center; gap: 11px; border: 1px solid #476e5b; border-radius: 11px; padding: 12px; background: #13201af5; box-shadow: 0 18px 48px #000b; color: #d5efe0; backdrop-filter: blur(12px); animation: app-update-notice-in 200ms ease-out; }
+.app-update-notice > i { display: grid; width: 27px; height: 27px; flex: none; place-items: center; border-radius: 50%; background: #57b68a; color: #0e2017; font: 800 15px Outfit, sans-serif; font-style: normal; }
+.app-update-notice > div:not(.app-update-actions) { flex: 1; min-width: 0; }
+.app-update-notice small, .app-update-notice strong, .app-update-notice span { display: block; }
+.app-update-notice small { color: #8fc7a8; font: 9px 'DM Mono', monospace; letter-spacing: .07em; }
+.app-update-notice strong { margin-top: 2px; font-size: 13px; }
+.app-update-notice span { margin-top: 2px; color: #a9c8b6; font-size: 11px; }
+.app-update-actions { display: flex; flex: none; flex-direction: column; gap: 5px; }
+.app-update-actions button { border: 1px solid #3f5f4f; border-radius: 7px; padding: 6px 10px; background: transparent; color: #cfe9da; font: 600 11px Outfit, sans-serif; cursor: pointer; }
+.app-update-actions button:hover:not(:disabled) { background: #22392e; }
+.app-update-actions button.restart { border-color: #57b68a; background: #2f6b4f; color: #f1fff7; }
+.app-update-actions button.restart:hover:not(:disabled) { background: #3a8060; }
+.app-update-actions button:disabled { opacity: .5; cursor: default; }
+.app-update-notice.install-error { border-color: #82643f; background: #241c11f5; }
+.app-update-notice.install-error > i { background: #d6a85a; color: #261a07; }
+@keyframes app-update-notice-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .app-update-notice { animation: none; } }

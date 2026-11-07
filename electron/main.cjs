@@ -7,7 +7,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { createAppAudioBridge } = require('./app-audio.cjs')
 const { createLinuxAudioBridge } = require('./app-audio-linux.cjs')
-const { registerWindowsUpdate } = require('./windows-update.cjs')
+const { registerAppUpdate } = require('./app-update.cjs')
 const appAudio = process.platform === 'linux' ? createLinuxAudioBridge() : createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
 
 // Remote call and screen-share audio can arrive after the user has joined a
@@ -22,8 +22,28 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 // authorization and a new installation id, which the host then rejects.
 // Keep a single copy per profile and bring its window forward instead. The
 // lock is per profile folder, so the host and guest apps still coexist.
-const isPrimaryInstance = app.requestSingleInstanceLock()
-if (!isPrimaryInstance) app.quit()
+//
+// After an update the new copy starts while the old one is still closing, so
+// it waits for that process to exit before asking for the lock. Otherwise it
+// would find the lock taken and quit, leaving no window open.
+const previousCopyPid = Number(process.env.BARRACORD_UPDATE_PREVIOUS_PID) || 0
+delete process.env.BARRACORD_UPDATE_PREVIOUS_PID
+function processRunning(pid) {
+  try { process.kill(pid, 0); return true }
+  catch (error) { return error.code === 'EPERM' }
+}
+async function waitForPreviousCopy() {
+  const deadline = Date.now() + 15_000
+  while (previousCopyPid && previousCopyPid !== process.pid && processRunning(previousCopyPid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+}
+let isPrimaryInstance = false
+const primaryInstanceReady = waitForPreviousCopy().then(() => {
+  isPrimaryInstance = app.requestSingleInstanceLock()
+  if (!isPrimaryInstance) app.quit()
+  return isPrimaryInstance
+})
 app.on('second-instance', () => {
   const window = BrowserWindow.getAllWindows()[0]
   if (!window) return
@@ -745,10 +765,10 @@ ipcMain.handle('share:sources', async (event) => {
   }))
 })
 
-app.whenReady().then(() => {
-  if (!isPrimaryInstance) return
+app.whenReady().then(async () => {
+  if (!await primaryInstanceReady) return
   configureMediaPermissions()
-  registerWindowsUpdate(app.isPackaged && process.platform === 'win32' && appRole() === 'guest')
+  registerAppUpdate(appRole())
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

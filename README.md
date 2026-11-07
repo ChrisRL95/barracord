@@ -4,13 +4,22 @@ Cliente desktop para voz, chat, compartilhamento de tela e soundboard. O anfitri
 
 [Instaladores de convidado para Windows](https://github.com/ChrisRL95/barracord/releases)
 
-## Atualizações do convidado no Windows
+## Atualizações do convidado
 
-A partir da beta.20, o instalador NSIS do convidado verifica o canal beta no GitHub. A seta no cabeçalho baixa e instala a versão disponível. Durante uma call, o download pode terminar, e a instalação fica para um clique depois de sair.
+O convidado empacotado verifica o canal beta no GitHub ao abrir e a cada minuto. Quando há versão nova, ele baixa sozinho em segundo plano e mostra um aviso com **Reiniciar agora**: um clique fecha o app e abre a versão nova. Durante uma call o botão fica bloqueado, e o aviso volta quando a call termina. A seta no cabeçalho mostra o progresso e também reinicia.
 
-Para publicar uma nova beta, aumente a versão em `package.json` e no lockfile, gere o instalador convidado e anexe o `.exe`, o `.exe.blockmap` e o `beta.yml` da mesma compilação à pré-release `v<versão>`. Publique os três arquivos juntos para que os clientes encontrem o manifesto e o instalador correspondente.
+- **Windows:** funciona no instalador NSIS a partir da beta.20. Quem ainda usa a beta.19 precisa instalar manualmente uma versão com o atualizador.
+- **Linux:** funciona no AppImage, que se substitui sem pedir senha. Guarde o arquivo com um nome sem versão, como `~/Applications/Barracord.AppImage`, para que atalhos continuem apontando para ele. O RPM não se atualiza sozinho (precisaria da senha do sistema a cada versão).
+- A versão de anfitrião usa um instalador próprio e não se atualiza sozinha.
 
-O atualizador é ativado no convidado Windows empacotado. A partir da beta.21, a verificação acontece ao abrir o app e a cada minuto enquanto ele estiver aberto. A versão de anfitrião usa um instalador próprio. Quem ainda usa a beta.19 precisa instalar manualmente uma versão com o atualizador.
+Para publicar uma nova beta, aumente a versão em `package.json` e no lockfile, gere os instaladores convidados e anexe à pré-release `v<versão>`, todos da mesma versão:
+
+- Windows: o `.exe`, o `.exe.blockmap` e o `beta.yml`.
+- Linux: o `.AppImage` e o `beta-linux.yml` (de `release/guest-linux/`).
+
+Sem o manifesto (`beta.yml` ou `beta-linux.yml`), os clientes daquele sistema não encontram a versão nova.
+
+Para testar o fluxo sem publicar, sirva por HTTP uma pasta com o manifesto e o instalador de uma versão mais nova e abra o app empacotado com `BARRACORD_UPDATE_FEED=http://127.0.0.1:<porta>/`.
 
 ## Desenvolvimento
 
