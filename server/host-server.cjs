@@ -6,6 +6,7 @@ const { mkdirSync, readFileSync, writeFileSync } = require('node:fs')
 const path = require('node:path')
 const { createTailscaleProvisioner } = require('./tailscale-provisioning.cjs')
 const { createSoundboard } = require('./soundboard.cjs')
+const { createProfiles } = require('./profiles.cjs')
 
 dotenv.config({ path: process.env.BARRACORD_ENV_FILE || path.resolve(process.cwd(), '.env.server') })
 
@@ -132,6 +133,16 @@ app.use(cors({
     callback(null, isTrustedClientOrigin(origin))
   },
 }))
+const profiles = createProfiles(path.resolve(dataDirectory, 'profiles'),
+  (id) => Object.hasOwn(members, id) ? getAuthorizedMember(id) : null,
+  tailscaleProvisioner.getGuestDevice)
+// Uma foto nova muda o avatarRevision da presença: avisa todos na hora.
+app.use('/profiles', (request, response, next) => {
+  response.on('finish', () => {
+    if (request.method !== 'GET' && response.statusCode < 300) void schedulePresenceRefresh()
+  })
+  next()
+}, profiles.router)
 app.use(express.json({ limit: '8kb' }))
 app.use('/soundboard', createSoundboard(path.resolve(dataDirectory, 'soundboard'), (id) => (
   typeof id === 'string' && Object.hasOwn(members, id) ? getAuthorizedMember(id) : null
@@ -184,7 +195,7 @@ async function readPresence() {
     channelId,
     streaming: participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'),
   })))
-  const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, ...activeMemberStatus(installationId, callsByInstallation) }))
+  const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, avatarRevision: profiles.avatarRevision(installationId), ...activeMemberStatus(installationId, callsByInstallation) }))
   return { channels: channelsPresence, members: memberList }
 }
 
@@ -476,6 +487,9 @@ app.post('/register', (request, response) => {
     if (typeof networkDeviceId === 'string' && networkDeviceId) {
       try {
         const device = await tailscaleProvisioner.getGuestDevice(networkDeviceId)
+        if (member?.tailscaleDeviceId && member.tailscaleDeviceId !== device.id) {
+          return response.status(403).json({ error: 'Este acesso já pertence a outro computador.' })
+        }
         if (!member) member = { name: participantName.trim(), authorizedAt: new Date().toISOString(), invite: normalizeInvite(invite) }
         member.tailscaleDeviceId = device.id
       } catch (error) {

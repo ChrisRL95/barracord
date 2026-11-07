@@ -5,8 +5,7 @@
   "files": [
     "dist/**/*",
     "electron/**/*",
-    "package.json",
-    "!node_modules/**/*"
+    "package.json"
   ],
   "extraResources": [
     {
@@ -14,6 +13,13 @@
       "to": "barracord-role.json"
     }
   ],
+  "publish": {
+    "provider": "github",
+    "owner": "ChrisRL95",
+    "repo": "barracord",
+    "channel": "beta",
+    "releaseType": "prerelease"
+  },
   "win": {
     "target": [
       "nsis"

@@ -83,7 +83,7 @@ function createTailscaleProvisioner(environment = process.env) {
     const tags = Array.isArray(device?.tags) ? device.tags : []
     if (!tags.includes(guestTag)) throw new Error('Esse computador não pertence à Rede da Barraca.')
     if (typeof device?.id !== 'string' || !device.id) throw new Error('A Rede da Barraca não confirmou a identidade deste computador.')
-    return { id: device.id }
+    return { id: device.id, addresses: Array.isArray(device.addresses) ? device.addresses.filter((value) => typeof value === 'string') : [] }
   }
 
   async function revokeGuestKey(keyId) {

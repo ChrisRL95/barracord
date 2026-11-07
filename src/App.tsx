@@ -10,6 +10,9 @@ import { isLinuxDesktop, systemText } from './platformText'
 import Soundboard from './Soundboard'
 import VoiceChannelMembers from './VoiceChannelMembers'
 import type { VoicePerson } from './VoiceChannelMembers'
+import MemberProfile, { ProfileAvatar } from './MemberProfile'
+import type { ProfileTarget } from './MemberProfile'
+import UpdateButton from './UpdateButton'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
 import { MicrophoneController, configureMicrophoneNoise, loadNoiseMode, microphoneCaptureOptions, noiseModeLabels } from './noiseSuppression'
@@ -40,7 +43,7 @@ type ChannelPresence = Record<string, Array<{ identity: string; name: string }>>
 type Channel = { id: string; name: string; protected: boolean }
 type ChannelCatalog = { text: Channel[]; voice: Channel[] }
 type TextMessage = { id: string; author: string; installationId: string; body: string; createdAt: string }
-type PresenceMember = { installationId: string; name: string; status: 'online' | 'away' | 'em-call' | 'streaming' | 'offline'; channelId: string | null }
+type PresenceMember = { installationId: string; name: string; status: 'online' | 'away' | 'em-call' | 'streaming' | 'offline'; channelId: string | null; avatarRevision?: string }
 type AdminMember = { installationId: string; name: string; authorizedAt: string; networkLinked?: boolean }
 type AdminInvite = { code: string; label: string; createdAt: string; expiresAt: string | null; usedAt: string | null; status: 'ativo' | 'usado' | 'revogado' | 'expirado'; activationReady?: boolean }
 type AdminData = { members: AdminMember[]; presence: ChannelPresence; channels: ChannelCatalog; invites: AdminInvite[]; metrics?: { streamCount: number; estimatedUploadMbps: number } }
@@ -202,6 +205,7 @@ function App() {
   // room: it reports joins and leaves long before the host's presence does.
   const [roomParticipants, setRoomParticipants] = useState<VoicePerson[]>([])
   const [joiningVoiceChannel, setJoiningVoiceChannel] = useState<string | null>(null)
+  const [profileTarget, setProfileTarget] = useState<ProfileTarget | null>(null)
   const [textMessages, setTextMessages] = useState<TextMessage[]>([])
   const [textDraft, setTextDraft] = useState('')
   const [copiedChatMessageId, setCopiedChatMessageId] = useState('')
@@ -1963,6 +1967,20 @@ function App() {
     if (member.status === 'em-call' || member.status === 'streaming') return { ...member, status: 'online' as const, channelId: null }
     return member
   }) : fallbackMembers
+  const viewerId = getInstallationId()
+  const profileMembers = new Map(presenceMembers.map((member) => [member.installationId, member]))
+  function profileUrl(id: string, avatarRevision?: string) {
+    const query = new URLSearchParams({ installationId: viewerId, ...(avatarRevision ? { v: avatarRevision } : {}) })
+    const endpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/profiles')
+    return `${endpoint}/${encodeURIComponent(id)}${avatarRevision ? '/avatar' : ''}?${query}`
+  }
+  function memberAvatar(id: string, name: string, className: string) {
+    const member = profileMembers.get(id)
+    const revision = member?.avatarRevision
+    return <ProfileAvatar name={member?.name || name} className={className + ' ' + avatarTone(id)}
+      image={revision ? profileUrl(id, revision) : undefined}
+      onClick={() => setProfileTarget({ id, name: member?.name || name })} />
+  }
   const memberGroups = (['streaming', 'em-call', 'online', 'away', 'offline'] as const).map((status) => ({ status, members: directoryMembers.filter((member) => member.status === status).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')) })).filter((group) => group.members.length)
   const estimatedUploadMbps = adminData?.metrics?.estimatedUploadMbps ?? 0
   const uploadLoad = estimatedUploadMbps / hostUploadLimit
@@ -1982,6 +2000,7 @@ function App() {
       {window.chriscordDesktop && isHostApp && <button className="host-header-action admin-trigger" type="button" onClick={() => setAdminOpen(true)}>Administrar</button>}
       {authorizedInstallation && !isHostApp && <button className="host-header-action" type="button" onClick={() => returnToActivation('Este computador foi desvinculado. Use uma ativação para entrar novamente.')}>Trocar acesso</button>}
       <button className="header-action" type="button" title="Configurações" onClick={openSettings}>⚙</button>
+      <UpdateButton inCall={connected || isConnecting || isReconnecting} />
     </header>
 
     {settingsOpen && renderSettingsReworkPanel()}
@@ -2003,7 +2022,7 @@ function App() {
             const active = activeVoiceChannel === channel.id && stageView === 'voice'
             return <section className={`voice-channel-entry ${active ? 'active' : ''}`} key={channel.id}>
               <button className={`room-pill voice-pill ${active ? 'active' : ''}`} type="button" onClick={() => requestVoiceChannel(channel.id)} disabled={isConnecting || barracaAccess !== 'available'} title={people.map((person) => person.name).join(', ')}><span>◉</span>{channel.name}<b>{activeVoiceChannel === channel.id ? 'na call' : joiningVoiceChannel === channel.id ? 'entrando…' : people.length || ''}</b></button>
-              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} avatarTone={avatarTone} />
+              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} renderAvatar={(person) => memberAvatar(person.identity, person.name, 'voice-channel-avatar')} />
             </section>
           })}
         </div>
@@ -2022,7 +2041,7 @@ function App() {
             </div>
             {connected && <button className={`screen-control ${isSharing ? 'broadcasting' : ''}`} type="button" onClick={toggleScreenShare} title={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'} aria-label={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}><ControlIcon name="screen" /><span>{isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}</span></button>}
           </section>
-          <div className="nav-user"><span className={`mini-avatar ${avatarTone(getInstallationId())}`}>{(participantName || 'V').slice(0, 1).toUpperCase()}</span><div><strong>{participantName || 'Você'}</strong><small>{connected ? `em ${voiceChannelName}` : 'na Barraca'}</small></div><button type="button" onClick={openSettings} title="Configurações" aria-label="Configurações"><ControlIcon name="settings" /></button></div>
+          <div className="nav-user">{memberAvatar(viewerId, participantName || 'Você', 'mini-avatar')}<div><strong>{participantName || 'Você'}</strong><small>{connected ? `em ${voiceChannelName}` : 'na Barraca'}</small></div><button type="button" onClick={openSettings} title="Configurações" aria-label="Configurações"><ControlIcon name="settings" /></button></div>
         </footer>
       </aside>
 
@@ -2049,7 +2068,7 @@ function App() {
             <div className="text-channel-intro"><span>#</span><div><strong>Bem-vindo a #{selectedTextChannel}</strong><p>Este é o começo do canal. As mensagens ficam guardadas na Barraca.</p></div></div>
             <div className="text-message-list">
               {textMessages.length ? textMessages.map((chat) => <article className={`text-message ${chat.installationId === getInstallationId() ? 'mine' : ''}`} key={chat.id}>
-                <span className={`text-avatar ${avatarTone(chat.installationId)}`}>{chat.author.slice(0, 1).toUpperCase()}</span>
+                {memberAvatar(chat.installationId, chat.author, 'text-avatar')}
                 <div><header><strong>{chat.installationId === getInstallationId() ? 'Você' : chat.author}</strong><time>{new Date(chat.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</time><button type="button" className="copy-chat-message" onClick={() => void copyChatMessage(chat)}>{copiedChatMessageId === chat.id ? 'Copiado' : 'Copiar'}</button></header><p><ChatMessageBody body={chat.body} /></p></div>
               </article>) : <p className="text-chat-empty">Esse canal ainda está quieto. Manda o primeiro salve.</p>}
             </div>
@@ -2072,7 +2091,7 @@ function App() {
             const audio = participantAudio[member.installationId] ?? { volume: 100, muted: false }
             const statusText = member.status === 'streaming' ? `transmitindo em ${channelName}` : member.status === 'em-call' ? `em ${channelName}` : member.status === 'online' ? 'na Barraca' : member.status === 'away' ? 'ausente' : 'offline'
             return <article className={`member directory-member ${isSelf ? 'self' : ''}`} key={member.installationId} onContextMenu={(event) => { if (!canAdjustAudio) return; event.preventDefault(); setMemberAudioMenuId((current) => current === member.installationId ? null : member.installationId) }} title={canAdjustAudio ? 'Clique com o botão direito para ajustar o áudio' : undefined}>
-              <span className={`member-avatar ${avatarTone(member.installationId)}`}>{member.name.slice(0, 1).toUpperCase()}</span>
+              {memberAvatar(member.installationId, member.name, 'member-avatar')}
               <div className="remote-member-info"><strong>{member.name} {isSelf && <small>você</small>}</strong><span className={`member-status ${member.status}`}>{statusText}</span></div>
               {canAdjustAudio && memberAudioMenuId === member.installationId && <section className="member-audio-menu" role="menu" aria-label={`Áudio de ${member.name}`} onContextMenu={(event) => event.preventDefault()}><header><strong>Áudio de {member.name}</strong><button type="button" onClick={() => setMemberAudioMenuId(null)} aria-label="Fechar">×</button></header><button type="button" className={audio.muted ? 'muted' : ''} onClick={() => changeParticipantAudio(member.installationId, { muted: !audio.muted })}><ControlIcon name={audio.muted ? 'soundOff' : 'sound'} />{audio.muted ? 'Ouvir novamente' : 'Silenciar para mim'}</button><label>Volume <output>{audio.volume}%</output><input type="range" min="0" max="100" value={audio.volume} onChange={(event) => changeParticipantAudio(member.installationId, { volume: Number(event.target.value) })} aria-label={`Volume de ${member.name}`} /></label></section>}
             </article>
@@ -2083,6 +2102,9 @@ function App() {
 
     {connected && voiceShortcutPressed && <div className={`voice-shortcut-active ${voiceKeyMode}`} role="status"><span><ControlIcon name={voiceKeyMode === 'push-to-talk' ? 'microphone' : 'microphoneOff'} /></span><div><small>{voiceShortcutLabel}</small><strong>{voiceKeyMode === 'push-to-talk' ? 'VOCÊ ESTÁ FALANDO' : 'MICROFONE MUTADO'}</strong></div></div>}
     <div ref={remoteAudioRef} className="remote-audio-frame" aria-hidden="true" />
+    {authorizedInstallation && profileTarget && <MemberProfile key={profileTarget.id} target={profileTarget} viewerId={viewerId}
+      url={profileUrl(profileTarget.id)} close={() => setProfileTarget(null)}
+      saved={(avatarRevision) => setPresenceMembers((members) => members.map((member) => member.installationId === viewerId ? { ...member, avatarRevision } : member))} />}
 
     {linuxShareOpen && <LinuxSharePicker audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => { setLinuxShareOpen(false); setMessage('A escolha de tela foi cancelada.') }} onStart={(mode, ids) => void startLinuxShare(mode, ids)} />}
     {shareSources && <SharePicker sources={shareSources} audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => void chooseShareSource(null)} onStart={(sourceId, audioSourceIds, mode) => void chooseShareSource(sourceId, audioSourceIds, mode)} onRefresh={async () => {
