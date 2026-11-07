@@ -46,4 +46,5 @@ contextBridge.exposeInMainWorld('chriscordDesktop', {
     return () => ipcRenderer.removeListener('share:request', listener)
   },
   isDesktop: true,
+  platform: process.platform,
 })

@@ -17,6 +17,8 @@ const defaultUrl = import.meta.env.VITE_LIVEKIT_URL ?? ''
 const defaultTokenEndpoint = import.meta.env.VITE_TOKEN_ENDPOINT ?? 'http://localhost:3001/token'
 const isDevelopment = import.meta.env.DEV
 const fallbackAppVersion = '0.1.0-beta'
+// The Linux desktop app shares the screen through the system portal picker.
+const isLinuxDesktop = typeof window !== 'undefined' && window.chriscordDesktop?.platform === 'linux'
 const defaultChannelCatalog = {
   text: [{ id: 'geral', name: 'geral', protected: true }, { id: 'clipes-e-memes', name: 'clipes-e-memes', protected: false }],
   voice: [{ id: 'geral', name: 'Geral', protected: true }, { id: 'jogatina', name: 'Jogatina', protected: false }, { id: 'filmes', name: 'Filmes', protected: false }, { id: 'afk', name: 'AFK', protected: false }],
@@ -1105,17 +1107,30 @@ function App() {
 
   async function startScreenShare(room: Room) {
     setScreenAudioWarning('')
-    if (shareAudioMode === 'application') throw new Error('Para escolher o áudio de um aplicativo, use o Barracord para Windows.')
+    // The Linux desktop app shares through the system portal picker, video only
+    // for now. Any saved audio choice degrades to a warning instead of an error.
+    const audioUnavailableOnLinux = isLinuxDesktop && shareAudioMode !== 'none'
+    if (shareAudioMode === 'application' && !isLinuxDesktop) throw new Error('Para escolher o áudio de um aplicativo, use o Barracord para Windows.')
     const profile = getScreenShareProfile()
     setSharingQuality(`${profile.height}p · até ${profile.frameRate} fps`)
-    const publication = await room.localParticipant.setScreenShareEnabled(
-      true,
-      { audio: shareAudio, resolution: { width: profile.width, height: profile.height, frameRate: profile.frameRate } },
-      { screenShareEncoding: { maxBitrate: profile.maxBitrate, maxFramerate: profile.maxFramerate } },
-    )
+    let publication
+    try {
+      publication = await room.localParticipant.setScreenShareEnabled(
+        true,
+        { audio: shareAudio && !isLinuxDesktop, resolution: { width: profile.width, height: profile.height, frameRate: profile.frameRate } },
+        { screenShareEncoding: { maxBitrate: profile.maxBitrate, maxFramerate: profile.maxFramerate } },
+      )
+    } catch (error) {
+      if (isLinuxDesktop && error instanceof DOMException && error.name === 'NotAllowedError') throw new Error('A escolha de tela foi cancelada.')
+      throw error
+    }
     if (!publication || publication.source !== Track.Source.ScreenShare) throw new Error('A tela não foi publicada.')
     setIsSharing(true)
-    setMessage('Sua tela está ao vivo.')
+    if (audioUnavailableOnLinux) {
+      const warning = 'Sua tela está ao vivo, sem áudio: no Linux a transmissão ainda não envia som.'
+      setScreenAudioWarning(warning)
+      setMessage(warning, 'warning')
+    } else setMessage('Sua tela está ao vivo.')
   }
 
   async function startScreenShareFromSource(room: Room, sourceId: string, audioSourceIds: string[], audioMode: ShareAudioMode) {
@@ -1293,7 +1308,7 @@ function App() {
         localScreenAudioTrackRef.current = null
         // LocalTrackUnpublished keeps the visual state in sync, including when
         // Windows ends a capture outside of the Barracord.
-      } else if (window.chriscordDesktop) {
+      } else if (window.chriscordDesktop && !isLinuxDesktop) {
         const sources = await window.chriscordDesktop.getShareSources()
         if (!sources.length) throw new Error('O Windows não encontrou telas ou janelas para compartilhar.')
         setShareSources(sources)
@@ -1318,7 +1333,7 @@ function App() {
       if (localAudioTrack) await room.localParticipant.unpublishTrack(localAudioTrack, true)
       localScreenTrackRef.current = null
       localScreenAudioTrackRef.current = null
-      if (window.chriscordDesktop) {
+      if (window.chriscordDesktop && !isLinuxDesktop) {
         const sources = await window.chriscordDesktop.getShareSources()
         if (!sources.length) throw new Error('O Windows não encontrou telas ou janelas para compartilhar.')
         setShareSources(sources)

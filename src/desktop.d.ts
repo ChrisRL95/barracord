@@ -1,6 +1,7 @@
 interface Window {
   chriscordDesktop?: {
     isDesktop: boolean
+    platform: string
     tailscaleStatus: () => Promise<{
       installed: boolean
       connected: boolean

@@ -136,6 +136,17 @@ function configureMediaPermissions() {
 
   session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     if (!isTrustedOrigin(request.securityOrigin)) return callback({})
+    if (process.platform === 'linux') {
+      // On Wayland every getSources call opens the desktop portal's own picker
+      // and returns only what the person chose there. Ask exactly once, with no
+      // thumbnails: a second request, or the short thumbnail stream, races the
+      // portal while it is starting the real stream (seen crashing
+      // xdg-desktop-portal-kde 6.7). System audio is not offered on Linux yet.
+      desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
+        .then((sources) => callback(sources[0] ? { video: sources[0] } : {}))
+        .catch(() => callback({}))
+      return
+    }
     desktopCapturer.getSources({
         types: ['screen', 'window'],
         thumbnailSize: { width: 480, height: 270 },
