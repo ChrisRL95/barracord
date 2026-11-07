@@ -13,6 +13,13 @@
       "to": "barracord-role.json"
     }
   ],
+  "publish": {
+    "provider": "github",
+    "owner": "ChrisRL95",
+    "repo": "barracord",
+    "channel": "beta",
+    "releaseType": "prerelease"
+  },
   "win": {
     "target": [
       "nsis"
@@ -26,14 +33,7 @@
         "from": "tools/tailscale",
         "to": "tools/tailscale"
       }
-    ],
-    "publish": {
-      "provider": "github",
-      "owner": "ChrisRL95",
-      "repo": "barracord",
-      "channel": "beta",
-      "releaseType": "prerelease"
-    }
+    ]
   },
   "nsis": {
     "oneClick": false,
