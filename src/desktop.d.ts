@@ -1,3 +1,8 @@
+type BarracordUpdateState =
+  | { phase: 'disabled' | 'idle' | 'checking' }
+  | { phase: 'available' | 'download-error' | 'ready' | 'install-error' | 'installing'; version: string }
+  | { phase: 'downloading'; version: string; percent: number }
+
 interface Window {
   chriscordDesktop?: {
     isDesktop: boolean
@@ -36,6 +41,10 @@ interface Window {
     hostAdminCode: () => Promise<string>
     setStreamFullscreen: (enabled: boolean) => Promise<boolean>
     appVersion: () => Promise<string>
+    updateState: () => Promise<BarracordUpdateState>
+    downloadUpdate: () => Promise<BarracordUpdateState>
+    installUpdate: () => Promise<BarracordUpdateState>
+    onUpdateState: (callback: (state: BarracordUpdateState) => void) => () => void
     writeClipboard: (text: string) => Promise<boolean>
     onHostStatus: (callback: (status: { state: 'stopped' | 'starting' | 'running' | 'error'; message: string; tailnetIp: string | null; role: 'host' | 'guest' }) => void) => () => void
     onStreamFullscreen: (callback: (enabled: boolean) => void) => () => void

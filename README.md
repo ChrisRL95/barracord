@@ -4,6 +4,14 @@ Cliente desktop para voz, chat, compartilhamento de tela e soundboard. O anfitri
 
 [Instaladores de convidado para Windows](https://github.com/ChrisRL95/barracord/releases)
 
+## Atualizações do convidado no Windows
+
+A partir da beta.20, o instalador NSIS do convidado verifica o canal beta no GitHub. A seta no cabeçalho baixa e instala a versão disponível. Durante uma call, o download pode terminar, e a instalação fica para um clique depois de sair.
+
+Para publicar uma nova beta, aumente a versão em `package.json` e no lockfile, gere o instalador convidado e anexe o `.exe`, o `.exe.blockmap` e o `beta.yml` da mesma compilação à pré-release `v<versão>`. Publique os três arquivos juntos para que os clientes encontrem o manifesto e o instalador correspondente.
+
+O atualizador é ativado no convidado Windows empacotado. A versão de anfitrião usa um instalador próprio. A beta.19 precisa receber a beta.20 por instalação manual para começar a verificar as próximas versões.
+
 ## Desenvolvimento
 
 Com Node.js 24 e npm, rode:

@@ -1,0 +1,20 @@
+.app-header .windows-update {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 32px;
+  width: auto;
+  padding-inline: 6px;
+  border: 1px solid #476e5b;
+  border-radius: 8px;
+  background: #1c382c;
+  color: #b9f5cd;
+}
+
+.app-header .windows-update:hover { background: #2b503c; }
+.app-header .windows-update[aria-disabled="true"] { cursor: default; }
+.app-header .windows-update span { font-size: 11px; font-variant-numeric: tabular-nums; }
+.app-header .windows-update.download-error,
+.app-header .windows-update.install-error { color: #ffe0a1; background: #42331f; border-color: #82643f; }

@@ -6,6 +6,7 @@ const { createHash } = require('node:crypto')
 const os = require('node:os')
 const path = require('node:path')
 const { createAppAudioBridge } = require('./app-audio.cjs')
+const { registerWindowsUpdate } = require('./windows-update.cjs')
 const appAudio = createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
 
 // Remote call and screen-share audio can arrive after the user has joined a
@@ -643,6 +644,7 @@ ipcMain.handle('share:sources', async (event) => {
 
 app.whenReady().then(() => {
   configureMediaPermissions()
+  registerWindowsUpdate(app.isPackaged && process.platform === 'win32' && appRole() === 'guest')
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

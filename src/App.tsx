@@ -5,6 +5,7 @@ import { captureAppAudio } from './appAudio'
 import type { AppAudioCapture } from './appAudio'
 import SharePicker from './SharePicker'
 import Soundboard from './Soundboard'
+import WindowsUpdateButton from './WindowsUpdateButton'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
 import { MicrophoneController, configureMicrophoneNoise, loadNoiseMode, microphoneCaptureOptions, noiseModeLabels } from './noiseSuppression'
@@ -1849,6 +1850,7 @@ function App() {
       {window.chriscordDesktop && isHostApp && <button className="host-header-action admin-trigger" type="button" onClick={() => setAdminOpen(true)}>Administrar</button>}
       {authorizedInstallation && !isHostApp && <button className="host-header-action" type="button" onClick={() => returnToActivation('Este computador foi desvinculado. Use uma ativação para entrar novamente.')}>Trocar acesso</button>}
       <button className="header-action" type="button" title="Configurações" onClick={openSettings}>⚙</button>
+      <WindowsUpdateButton inCall={connected || isConnecting || isReconnecting} />
     </header>
 
     {settingsOpen && renderSettingsReworkPanel()}
