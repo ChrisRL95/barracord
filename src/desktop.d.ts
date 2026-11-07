@@ -45,6 +45,7 @@ interface Window {
     getShareSources: () => Promise<Array<{ id: string; name: string; thumbnail: string; isScreen: boolean; appIcon?: string }>>
     startAppAudio: (sourceIds: string[]) => Promise<{ ok: boolean; id?: string; error?: string }>
     stopAppAudio: (id: string) => Promise<boolean>
+    listAudioApplications: () => Promise<Array<{ id: string; name: string; streams: number }>>
     onAppAudioPcm: (callback: (payload: { id: string; sourceIndex: number; pcm: Uint8Array }) => void) => () => void
     onAppAudioEnded: (callback: (payload: { id: string; error: string }) => void) => () => void
     onShareRequest: (callback: (sources: Array<{ id: string; name: string; thumbnail: string; isScreen: boolean }>) => void) => () => void

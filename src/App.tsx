@@ -4,6 +4,7 @@ import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoQuality 
 import { captureAppAudio } from './appAudio'
 import type { AppAudioCapture } from './appAudio'
 import SharePicker from './SharePicker'
+import LinuxSharePicker from './LinuxSharePicker'
 import Soundboard from './Soundboard'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
@@ -256,6 +257,7 @@ function App() {
     return saved === 'auto' || saved === 'smooth' || saved === 'gaming' || saved === 'maximum' ? saved : 'maximum'
   })
   const [shareSources, setShareSources] = useState<ShareSource[] | null>(null)
+  const [linuxShareOpen, setLinuxShareOpen] = useState(false)
   const [tailscaleStatus, setTailscaleStatus] = useState<'ready' | 'missing' | 'offline' | 'needs-attention' | null>(null)
   const [privateNetworkAction, setPrivateNetworkAction] = useState(false)
   const [privateNetworkChecking, setPrivateNetworkChecking] = useState(false)
@@ -1107,30 +1109,17 @@ function App() {
 
   async function startScreenShare(room: Room) {
     setScreenAudioWarning('')
-    // The Linux desktop app shares through the system portal picker, video only
-    // for now. Any saved audio choice degrades to a warning instead of an error.
-    const audioUnavailableOnLinux = isLinuxDesktop && shareAudioMode !== 'none'
-    if (shareAudioMode === 'application' && !isLinuxDesktop) throw new Error('Para escolher o áudio de um aplicativo, use o Barracord para Windows.')
+    if (shareAudioMode === 'application') throw new Error('Para escolher o áudio de um aplicativo, use o Barracord para Windows.')
     const profile = getScreenShareProfile()
     setSharingQuality(`${profile.height}p · até ${profile.frameRate} fps`)
-    let publication
-    try {
-      publication = await room.localParticipant.setScreenShareEnabled(
-        true,
-        { audio: shareAudio && !isLinuxDesktop, resolution: { width: profile.width, height: profile.height, frameRate: profile.frameRate } },
-        { screenShareEncoding: { maxBitrate: profile.maxBitrate, maxFramerate: profile.maxFramerate } },
-      )
-    } catch (error) {
-      if (isLinuxDesktop && error instanceof DOMException && error.name === 'NotAllowedError') throw new Error('A escolha de tela foi cancelada.')
-      throw error
-    }
+    const publication = await room.localParticipant.setScreenShareEnabled(
+      true,
+      { audio: shareAudio, resolution: { width: profile.width, height: profile.height, frameRate: profile.frameRate } },
+      { screenShareEncoding: { maxBitrate: profile.maxBitrate, maxFramerate: profile.maxFramerate } },
+    )
     if (!publication || publication.source !== Track.Source.ScreenShare) throw new Error('A tela não foi publicada.')
     setIsSharing(true)
-    if (audioUnavailableOnLinux) {
-      const warning = 'Sua tela está ao vivo, sem áudio: no Linux a transmissão ainda não envia som.'
-      setScreenAudioWarning(warning)
-      setMessage(warning, 'warning')
-    } else setMessage('Sua tela está ao vivo.')
+    setMessage('Sua tela está ao vivo.')
   }
 
   async function startScreenShareFromSource(room: Room, sourceId: string, audioSourceIds: string[], audioMode: ShareAudioMode) {
@@ -1147,10 +1136,20 @@ function App() {
         maxFrameRate: profile.frameRate,
       },
     }
-    setMessage('O Windows está iniciando a captura da tela…')
+    setMessage(isLinuxDesktop ? 'Escolha a tela ou janela na janela do sistema…' : 'O Windows está iniciando a captura da tela…')
     let systemAudioWarning = ''
     let stream: MediaStream
-    if (audioMode === 'system' && window.chriscordDesktop) {
+    if (isLinuxDesktop) {
+      // The desktop portal's dialog opens here and waits for the person, so
+      // there is no timeout. Sound never comes from the portal: PipeWire
+      // provides it below through the app-audio bridge.
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ audio: false, video: { width: profile.width, height: profile.height, frameRate: profile.frameRate } })
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'NotAllowedError') throw new Error('A escolha de tela foi cancelada.')
+        throw error
+      }
+    } else if (audioMode === 'system' && window.chriscordDesktop) {
       const prepared = await window.chriscordDesktop.prepareShareCapture(sourceId, true)
       if (!prepared.ok) throw new Error('O Windows não preparou o áudio do sistema para esta transmissão.')
       try {
@@ -1199,9 +1198,10 @@ function App() {
     let appCapture: AppAudioCapture | null = null
     let localAudioTrack: LocalAudioTrack | null = null
     try {
-      if (audioMode === 'application') {
+      if (audioMode === 'application' || (isLinuxDesktop && audioMode === 'system')) {
         try {
-          appCapture = await captureAppAudio(audioSourceIds, (detail) => {
+          // On Linux, "system" means every application except Barracord itself.
+          appCapture = await captureAppAudio(isLinuxDesktop && audioMode === 'system' ? ['pipewire:all'] : audioSourceIds, (detail) => {
             const audio = localScreenAudioTrackRef.current
             if (audio && audio.mediaStreamTrack === appCapture?.track) {
               localScreenAudioTrackRef.current = null
@@ -1313,7 +1313,8 @@ function App() {
         if (!sources.length) throw new Error('O Windows não encontrou telas ou janelas para compartilhar.')
         setShareSources(sources)
         setMessage('Escolha uma tela ou janela para transmitir.')
-      } else await startScreenShare(room)
+      } else if (isLinuxDesktop) setLinuxShareOpen(true)
+      else await startScreenShare(room)
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Escolha uma tela ou janela e permita o acesso para transmitir.'
       setMessage(detail, 'error')
@@ -1337,7 +1338,8 @@ function App() {
         const sources = await window.chriscordDesktop.getShareSources()
         if (!sources.length) throw new Error('O Windows não encontrou telas ou janelas para compartilhar.')
         setShareSources(sources)
-      } else await startScreenShare(room)
+      } else if (isLinuxDesktop) setLinuxShareOpen(true)
+      else await startScreenShare(room)
     } catch { setMessage('A troca foi cancelada. Sua transmissão foi encerrada.') }
   }
 
@@ -1731,6 +1733,21 @@ function App() {
     } catch { setMessage('O Windows não permitiu trocar esse dispositivo de áudio.', 'error') }
   }
 
+  async function startLinuxShare(audioMode: ShareAudioMode, audioSourceIds: string[]) {
+    setLinuxShareOpen(false)
+    const room = roomRef.current
+    if (!room || shareStartPendingRef.current) return
+    shareStartPendingRef.current = true
+    try {
+      await startScreenShareFromSource(room, '', audioSourceIds, audioMode)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'A tela escolhida não foi confirmada.'
+      const cancelled = detail === 'A escolha de tela foi cancelada.'
+      setMessage(detail, cancelled ? 'info' : 'error')
+      if (!cancelled) recordSafeEvent('error', `Falha ao capturar a tela escolhida: ${detail}`)
+    } finally { shareStartPendingRef.current = false }
+  }
+
   async function chooseShareSource(sourceId: string | null, audioSourceIds: string[] = [], audioMode: ShareAudioMode = shareAudioMode) {
     if (!window.chriscordDesktop) return
     if (shareStartPendingRef.current) return
@@ -1969,6 +1986,7 @@ function App() {
     {connected && voiceShortcutPressed && <div className={`voice-shortcut-active ${voiceKeyMode}`} role="status"><span><ControlIcon name={voiceKeyMode === 'push-to-talk' ? 'microphone' : 'microphoneOff'} /></span><div><small>{voiceShortcutLabel}</small><strong>{voiceKeyMode === 'push-to-talk' ? 'VOCÊ ESTÁ FALANDO' : 'MICROFONE MUTADO'}</strong></div></div>}
     <div ref={remoteAudioRef} className="remote-audio-frame" aria-hidden="true" />
 
+    {linuxShareOpen && <LinuxSharePicker audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => { setLinuxShareOpen(false); setMessage('A escolha de tela foi cancelada.') }} onStart={(mode, ids) => void startLinuxShare(mode, ids)} />}
     {shareSources && <SharePicker sources={shareSources} audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => void chooseShareSource(null)} onStart={(sourceId, audioSourceIds, mode) => void chooseShareSource(sourceId, audioSourceIds, mode)} onRefresh={async () => {
       const sources = await window.chriscordDesktop!.getShareSources()
       setShareSources((current) => current === null ? null : sources)

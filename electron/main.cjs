@@ -6,7 +6,8 @@ const { createHash } = require('node:crypto')
 const os = require('node:os')
 const path = require('node:path')
 const { createAppAudioBridge } = require('./app-audio.cjs')
-const appAudio = createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
+const { createLinuxAudioBridge } = require('./app-audio-linux.cjs')
+const appAudio = process.platform === 'linux' ? createLinuxAudioBridge() : createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
 
 // Remote call and screen-share audio can arrive after the user has joined a
 // room. Electron otherwise applies Chromium's autoplay policy to that late
@@ -141,7 +142,8 @@ function configureMediaPermissions() {
       // and returns only what the person chose there. Ask exactly once, with no
       // thumbnails: a second request, or the short thumbnail stream, races the
       // portal while it is starting the real stream (seen crashing
-      // xdg-desktop-portal-kde 6.7). System audio is not offered on Linux yet.
+      // xdg-desktop-portal-kde 6.7). Sound comes from PipeWire instead
+      // (app-audio-linux.cjs), so the portal is asked for video only.
       desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
         .then((sources) => callback(sources[0] ? { video: sources[0] } : {}))
         .catch(() => callback({}))
@@ -698,6 +700,10 @@ ipcMain.handle('share:prepare-capture', (event, sourceId, withSystemAudio) => {
 ipcMain.handle('app-audio:start', (event, sourceIds) => {
   if (!isTrustedOrigin(event.senderFrame?.url || event.sender.getURL())) return { ok: false, error: 'Origem não autorizada.' }
   return appAudio.start(event.sender, sourceIds)
+})
+ipcMain.handle('app-audio:list', (event) => {
+  if (!isTrustedOrigin(event.senderFrame?.url || event.sender.getURL())) return []
+  return appAudio.listSources ? appAudio.listSources() : []
 })
 ipcMain.handle('app-audio:stop', (event, id) => {
   if (!isTrustedOrigin(event.senderFrame?.url || event.sender.getURL()) || typeof id !== 'string') return false
