@@ -3,32 +3,36 @@ on:
   push:
     branches: [ci/beta24-linux]
 permissions:
-  contents: read
+  actions: read
+  contents: write
 jobs:
-  linux:
+  attach-linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      VITE_LIVEKIT_URL: ${{ vars.BARRACORD_BETA24_LIVEKIT_URL }}
-      VITE_TOKEN_ENDPOINT: ${{ vars.BARRACORD_BETA24_TOKEN_ENDPOINT }}
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y rpm libfuse2t64
-      - run: npm ci
-      - run: |
-          test -n "$VITE_LIVEKIT_URL" && test -n "$VITE_TOKEN_ENDPOINT"
-          npm run build:tailnet
-          npx --no-install electron-builder --linux AppImage rpm --x64 --config electron-builder.guest.json --config.directories.output=release/guest-linux --publish never
-      - uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: barracord-beta24-linux
-          path: |
-            release/guest-linux/*.AppImage
-            release/guest-linux/*.rpm
-            release/guest-linux/beta-linux.yml
-          if-no-files-found: error
-          compression-level: 0
+          path: packages
+          run-id: 42508650337
+          github-token: ${{ github.token }}
+      - name: Verify and attach Linux packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: '438426812'
+        run: |
+          cd packages
+          image=Barracord-0.1.0-beta.24-x86_64.AppImage
+          rpm=Barracord-0.1.0-beta.24-x86_64.rpm
+          hash="$(openssl dgst -sha512 -binary "$image" | openssl base64 -A)"
+          grep -Fx 'version: 0.1.0-beta.24' beta-linux.yml
+          grep -F "$image" beta-linux.yml
+          grep -F "$hash" beta-linux.yml >/dev/null
+          test -s "$rpm"
+          file "$image" "$rpm"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json
+          jq -e '.draft and .tag_name == "v0.1.0-beta.24" and .target_commitish == "713d4011ec8bf6054e85ffdc19cc4e040a1ce979"' release.json >/dev/null
+          for asset in "$image" "$rpm" beta-linux.yml; do
+            curl --silent --show-error --fail-with-body --retry 3               -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream"               --data-binary "@$asset" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$asset" > asset.json
+            jq -e --arg name "$asset" --argjson size "$(stat -c %s "$asset")" '.state == "uploaded" and .name == $name and .size == $size' asset.json >/dev/null
+          done
