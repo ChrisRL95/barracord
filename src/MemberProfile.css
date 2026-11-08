@@ -43,6 +43,7 @@
   cursor: pointer;
 }
 .member-profile-dialog button:disabled { opacity: .55; cursor: default; }
+.member-profile-attention { margin-top: 10px; }
 .member-profile-image-field button { justify-self: start; font-size: 11px; }
 .member-profile-form textarea { width: 100%; box-sizing: border-box; padding: 8px; resize: vertical; border: 1px solid #55456e; border-radius: 7px; background: #120e1b; color: inherit; font: inherit; }
 .member-profile-form footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

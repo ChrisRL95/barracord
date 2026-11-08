@@ -1,5 +1,6 @@
-const { app, BrowserWindow, clipboard, desktopCapturer, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, clipboard, desktopCapturer, globalShortcut, ipcMain, session, shell } = require('electron')
 const { execFile, spawn } = require('node:child_process')
+const { createInterface } = require('node:readline')
 const { closeSync, existsSync, mkdirSync, openSync, readFileSync } = require('node:fs')
 const { mkdtemp, readFile, writeFile, rm } = require('node:fs/promises')
 const { createHash } = require('node:crypto')
@@ -8,7 +9,8 @@ const path = require('node:path')
 const { createAppAudioBridge } = require('./app-audio.cjs')
 const { createLinuxAudioBridge } = require('./app-audio-linux.cjs')
 const { registerAppUpdate } = require('./app-update.cjs')
-const appAudio = process.platform === 'linux' ? createLinuxAudioBridge() : createAppAudioBridge({ executable: path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe'), desktopCapturer })
+const windowsHelperPath = path.join(app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..'), 'tools', 'app-audio', 'barracord-app-audio.exe')
+const appAudio = process.platform === 'linux' ? createLinuxAudioBridge() : createAppAudioBridge({ executable: windowsHelperPath, desktopCapturer })
 
 // Remote call and screen-share audio can arrive after the user has joined a
 // room. Electron otherwise applies Chromium's autoplay policy to that late
@@ -726,6 +728,87 @@ ipcMain.handle('stream:set-fullscreen', (event, enabled) => {
   return window.isFullScreen()
 })
 ipcMain.handle('app:version', () => app.getVersion())
+const registeredCallShortcuts = new Map()
+function clearCallShortcuts(contents) {
+  const cleanup = registeredCallShortcuts.get(contents) ?? []
+  registeredCallShortcuts.delete(contents)
+  for (const release of cleanup) release()
+}
+const callShortcutBindings = new Map()
+function refreshCallShortcuts(window) {
+  const contents = window.webContents
+  clearCallShortcuts(contents)
+  if (window.isFocused()) return
+  const bindings = callShortcutBindings.get(contents) ?? []
+  if (!bindings.length) return
+  const cleanup = []
+  const rejected = new Set()
+  registeredCallShortcuts.set(contents, cleanup)
+  const reportRejected = () => {
+    if (registeredCallShortcuts.get(contents) === cleanup) contents.send('shortcuts:rejected', [...rejected])
+  }
+  for (const { id, accelerator } of bindings) {
+    const sendPressed = () => {
+      if (!window.isDestroyed() && !window.isFocused() && registeredCallShortcuts.get(contents) === cleanup) contents.send('shortcuts:pressed', id)
+    }
+    const isoBackslash = isWindows && /^IsoBackslash:(\d|1[0-5])$/.exec(accelerator)
+    if (isoBackslash) {
+      // Electron resolves the character to OEM_5, while the ISO key is OEM_102.
+      const flags = Number(isoBackslash[1])
+      const modifiers = (flags & 12) | ((flags & 1) << 1) | ((flags & 2) >> 1)
+      const child = spawn(windowsHelperPath, ['--iso-backslash-hotkey', String(modifiers)], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
+      const lines = createInterface({ input: child.stdout })
+      const unavailable = () => { rejected.add(id); reportRejected() }
+      child.stdin.on('error', () => {})
+      child.once('error', unavailable)
+      child.once('exit', unavailable)
+      lines.on('line', (line) => { if (line === 'pressed') sendPressed() })
+      cleanup.push(() => { lines.close(); child.kill() })
+      continue
+    }
+    let lastPress = -Infinity
+    try {
+      if (globalShortcut.register(accelerator, () => {
+        const now = Date.now()
+        const repeated = now - lastPress < 600
+        lastPress = now
+        if (!repeated) sendPressed()
+      })) {
+        cleanup.push(() => globalShortcut.unregister(accelerator))
+        continue
+      }
+    } catch { /* The renderer can still handle the binding in focus. */ }
+    rejected.add(id)
+  }
+  reportRejected()
+}
+ipcMain.handle('shortcuts:register', (event, bindings) => {
+  const contents = event.sender
+  const window = BrowserWindow.fromWebContents(contents)
+  if (!window || event.senderFrame !== contents.mainFrame || !Array.isArray(bindings)) return
+  const valid = bindings.slice(0, 24).filter((binding) =>
+    typeof binding?.id === 'string' && typeof binding.accelerator === 'string' && binding.accelerator.length <= 60)
+  if (valid.length) callShortcutBindings.set(contents, valid)
+  else callShortcutBindings.delete(contents)
+  refreshCallShortcuts(window)
+})
+app.on('browser-window-blur', (_event, window) => refreshCallShortcuts(window))
+app.on('browser-window-focus', (_event, window) => clearCallShortcuts(window.webContents))
+app.on('web-contents-created', (_event, contents) => {
+  const release = () => {
+    clearCallShortcuts(contents)
+    callShortcutBindings.delete(contents)
+  }
+  contents.once('destroyed', release)
+  contents.on('render-process-gone', release)
+  contents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) release()
+  })
+})
+app.on('will-quit', () => {
+  for (const contents of registeredCallShortcuts.keys()) clearCallShortcuts(contents)
+  globalShortcut.unregisterAll()
+})
 ipcMain.handle('clipboard:write', (_event, text) => {
   if (typeof text !== 'string' || text.length > 50_000) return false
   clipboard.writeText(text)

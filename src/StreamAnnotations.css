@@ -1,0 +1,37 @@
+.text-stream-annotation-frame { position: relative; }
+.stream-annotation-layer {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  fill: none;
+  stroke: #e2afff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 1px 2px #12091b);
+}
+.stream-annotation-layer.drawing { pointer-events: auto; touch-action: none; cursor: crosshair; }
+.annotation-pointer { fill: #ee8cff; stroke: #fff0ff; stroke-width: 1.5; }
+.stream-annotation-tools {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 7;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: calc(100% - 20px);
+}
+.stream-annotation-tools button {
+  padding: 6px 8px;
+  border: 1px solid #655284;
+  border-radius: 6px;
+  background: #21192ef2;
+  color: #f7edff;
+}
+.stream-annotation-tools button[aria-pressed="true"] { background: #554778; }
+.stream-annotation-tools button:disabled { opacity: .55; }

@@ -55,14 +55,15 @@ function ProfileCard({ name, profile }: { name: string; profile: Profile }) {
   </article>
 }
 
-export default function MemberProfile({ target, viewerId, url, close, saved }: {
-  target: ProfileTarget; viewerId: string; url: string; close: () => void; saved: (revision?: string) => void
+export default function MemberProfile({ target, viewerId, url, close, saved, callAttention }: {
+  target: ProfileTarget; viewerId: string; url: string; close: () => void; saved: (revision?: string) => void; callAttention: () => void
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [draft, setDraft] = useState<Profile | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [showActions, setShowActions] = useState(false)
   const editable = target.id === viewerId
 
   useEffect(() => {
@@ -134,7 +135,18 @@ export default function MemberProfile({ target, viewerId, url, close, saved }: {
           <small>{draft.bio.length}/180</small>
           <footer><span role="status">{notice}</span><button type="submit" className="member-profile-save" disabled={busy}>{busy ? 'Aguarde…' : 'Salvar perfil'}</button></footer>
         </form>}
-        <div>{editable && <small className="member-profile-preview-label">PRÉVIA</small>}<ProfileCard name={target.name} profile={draft} /></div>
+        <div onContextMenu={(event) => {
+          if (editable) return
+          event.preventDefault()
+          setShowActions(true)
+        }}>
+          {editable && <small className="member-profile-preview-label">PRÉVIA</small>}
+          <ProfileCard name={target.name} profile={draft} />
+          {!editable && showActions && <button type="button" className="member-profile-attention" onClick={() => {
+            dialog.current?.close()
+            callAttention()
+          }}>Chamar atenção</button>}
+        </div>
       </div>}
     </div>
   </dialog>

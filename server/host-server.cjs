@@ -2,11 +2,13 @@ const dotenv = require('dotenv')
 const cors = require('cors')
 const express = require('express')
 const { AccessToken, RoomServiceClient, WebhookReceiver } = require('livekit-server-sdk')
-const { mkdirSync, readFileSync, writeFileSync } = require('node:fs')
+const { mkdirSync, readFileSync, renameSync, writeFileSync } = require('node:fs')
 const path = require('node:path')
 const { createTailscaleProvisioner } = require('./tailscale-provisioning.cjs')
 const { createSoundboard } = require('./soundboard.cjs')
-const { createProfiles } = require('./profiles.cjs')
+const { createProfiles, verifyMemberDevice } = require('./profiles.cjs')
+const { getLinkPreview } = require('./link-preview.cjs')
+const { createChatMedia } = require('./chat-media.cjs')
 
 dotenv.config({ path: process.env.BARRACORD_ENV_FILE || path.resolve(process.cwd(), '.env.server') })
 
@@ -65,7 +67,9 @@ function saveMembers() {
 }
 function saveMessages() {
   mkdirSync(path.dirname(messagesFile), { recursive: true })
-  writeFileSync(messagesFile, JSON.stringify(messages, null, 2), 'utf8')
+  const temporary = messagesFile + '.tmp'
+  writeFileSync(temporary, JSON.stringify(messages, null, 2), 'utf8')
+  renameSync(temporary, messagesFile)
 }
 function saveChannels() {
   mkdirSync(path.dirname(channelsFile), { recursive: true })
@@ -144,6 +148,12 @@ app.use('/profiles', (request, response, next) => {
   next()
 }, profiles.router)
 app.use(express.json({ limit: '8kb' }))
+const chatMedia = createChatMedia(path.resolve(dataDirectory, 'chat-media'), {
+  getMember: getAuthorizedMember,
+  hasChannel: (id) => typeof id === 'string' && Boolean(channelById('text', id)),
+  addMessage: addChatMessage,
+})
+app.use('/chat-media', chatMedia.router)
 app.use('/soundboard', createSoundboard(path.resolve(dataDirectory, 'soundboard'), (id) => (
   typeof id === 'string' && Object.hasOwn(members, id) ? getAuthorizedMember(id) : null
 )))
@@ -175,11 +185,17 @@ function activeMemberStatus(installationId, callsByInstallation) {
 // clientes. O webhook do LiveKit pede uma nova leitura assim que alguém entra,
 // sai ou começa a transmitir, e o resultado vai para todos pelo /presence/stream.
 const presenceSubscribers = new Set()
+const attentionSubscribers = new Map()
+const attentionCooldowns = new Map()
 const presenceSafetyIntervalMs = 5_000
 let presenceSnapshot = null
 let presenceSnapshotJson = ''
 let presenceRefreshRunning = null
 let presenceRefreshQueued = false
+
+function isSharingScreen(participant) {
+  return Boolean(participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'))
+}
 
 async function readPresence() {
   const presence = await Promise.all(channels.voice.map(async (channel) => {
@@ -189,11 +205,21 @@ async function readPresence() {
   const channelsPresence = Object.fromEntries(presence.map(([channelId, participants]) => [channelId, participants
     .slice()
     .sort((a, b) => Number(a.joinedAt ?? 0) - Number(b.joinedAt ?? 0))
-    .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))]))
+    .map((participant) => {
+      const voice = participant.metadata
+      return {
+        identity: participant.identity,
+        name: participant.name || participant.identity,
+        // Só vai no JSON o que estiver ligado, para não pesar a presença.
+        ...((voice === 'muted' || voice === 'deafened') && { muted: true }),
+        ...(voice === 'deafened' && { deafened: true }),
+        ...(isSharingScreen(participant) && { sharing: true }),
+      }
+    })]))
   const callsByInstallation = new Map()
   presence.forEach(([channelId, participants]) => participants.forEach((participant) => callsByInstallation.set(participant.identity, {
     channelId,
-    streaming: participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'),
+    streaming: isSharingScreen(participant),
   })))
   const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, avatarRevision: profiles.avatarRevision(installationId), ...activeMemberStatus(installationId, callsByInstallation) }))
   return { channels: channelsPresence, members: memberList }
@@ -264,23 +290,48 @@ app.get('/presence', async (request, response) => {
 })
 
 app.get('/presence/stream', (request, response) => {
-  if (!getAuthorizedMember(request.query.installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
+  const { installationId, attention } = request.query
+  if (!getAuthorizedMember(installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   response.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
   response.flushHeaders()
   response.write('retry: 2000\n\n')
   presenceSubscribers.add(response)
+  if (attention === '1') attentionSubscribers.set(response, installationId)
   const keepAlive = setInterval(() => response.write(': ping\n\n'), 20_000)
   request.on('close', () => {
     clearInterval(keepAlive)
     presenceSubscribers.delete(response)
+    attentionSubscribers.delete(response)
   })
   // Sem leitura ainda, a primeira atualização já chega a este assinante pelo broadcast.
   if (presenceSnapshotJson) sendPresence(response, presenceSnapshotJson)
   else void schedulePresenceRefresh()
 })
 
+app.post('/presence/attention', (request, response) => {
+  const { installationId, targetId } = request.body ?? {}
+  const sender = getAuthorizedMember(installationId)
+  if (!sender) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
+  if (installationId === targetId || !getAuthorizedMember(targetId)) {
+    return response.status(400).json({ error: 'Escolha outro membro da Barraca.' })
+  }
+  const recipients = [...attentionSubscribers].filter(([stream, id]) => id === targetId && !stream.destroyed && !stream.writableEnded)
+  if (!recipients.length) return response.status(409).json({ error: 'Esse membro está com o Barracord fechado ou indisponível.' })
+
+  const now = Date.now()
+  for (const [id, until] of attentionCooldowns) if (until <= now) attentionCooldowns.delete(id)
+  if (attentionCooldowns.has(installationId) || attentionCooldowns.has(targetId)) {
+    return response.status(429).json({ error: 'Aguarde alguns segundos para chamar atenção novamente.' })
+  }
+  attentionCooldowns.set(installationId, now + 10_000)
+  attentionCooldowns.set(targetId, now + 10_000)
+  const event = `event: attention\ndata: ${JSON.stringify({ name: sender.name, senderId: installationId })}\n\n`
+  for (const [stream] of recipients) stream.write(event)
+  return response.status(204).end()
+})
+
 function getAuthorizedMember(installationId) {
-  return typeof installationId === 'string' ? members[installationId] : null
+  return typeof installationId === 'string' && Object.hasOwn(members, installationId) ? members[installationId] : null
 }
 
 function requireHostCode(request, response) {
@@ -420,8 +471,11 @@ app.delete('/admin/channels/:id', async (request, response) => {
     const participants = await roomService.listParticipants(channel.id)
     if (participants.length) return response.status(409).json({ error: 'Não é possível remover um canal de voz com pessoas na call.' })
   } else {
+    const previous = messages[channel.id] ?? []
     delete messages[channel.id]
-    saveMessages()
+    try { saveMessages() }
+    catch (error) { messages[channel.id] = previous; throw error }
+    for (const message of previous) if (message.media?.kind === 'voice') chatMedia.removeVoice(message.media.id)
   }
   channels[type] = channels[type].filter((item) => item.id !== channel.id)
   saveChannels()
@@ -445,6 +499,11 @@ app.delete('/admin/members/:installationId', async (request, response) => {
   return response.json({ ok: true, networkRemoved: Boolean(member.tailscaleDeviceId) })
 })
 
+app.get('/messages/preview', async (request, response) => {
+  if (!getAuthorizedMember(request.query.installationId)) return response.status(401).end()
+  return response.json({ preview: await getLinkPreview(request.query.url) })
+})
+
 app.get('/messages', (request, response) => {
   const channel = typeof request.query.channel === 'string' ? request.query.channel : ''
   const member = getAuthorizedMember(request.query.installationId)
@@ -459,11 +518,46 @@ app.post('/messages', (request, response) => {
   if (!member) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   if (!channelById('text', channel)) return response.status(400).json({ error: 'Canal de texto inválido.' })
   if (typeof body !== 'string' || !body.trim() || body.trim().length > 1_000) return response.status(400).json({ error: 'A mensagem deve ter entre 1 e 1000 caracteres.' })
-  const message = { id: crypto.randomUUID(), author: member.name, installationId, body: body.trim(), createdAt: new Date().toISOString() }
-  messages[channel] = [...(messages[channel] || []), message].slice(-500)
-  saveMessages()
-  return response.status(201).json({ message })
+  return response.status(201).json({ message: addChatMessage(channel, member, installationId, body.trim()) })
 })
+
+app.delete('/messages/:id', async (request, response) => {
+  const { channel, installationId } = request.body ?? {}
+  const isAdmin = request.body?.hostCode === hostCode
+  const member = getAuthorizedMember(installationId)
+  if (!isAdmin && !member) return response.status(401).json({ error: 'Entre na Barraca para excluir mensagens.' })
+  if (typeof channel !== 'string' || !channelById('text', channel)) {
+    return response.status(400).json({ error: 'Canal de texto inválido.' })
+  }
+  const find = () => (messages[channel] ?? []).find((message) => message.id === request.params.id)
+  const message = find()
+  if (!message) return response.sendStatus(204)
+  if (!isAdmin) {
+    if (message.installationId !== installationId) return response.status(403).json({ error: 'Você só pode excluir suas próprias mensagens.' })
+    const verified = await verifyMemberDevice(request, member, tailscaleProvisioner.getGuestDevice)
+    if (!verified || getAuthorizedMember(installationId) !== member) {
+      return response.status(403).json({ error: 'Não consegui confirmar seu computador na Rede da Barraca. Conecte o Tailscale e tente novamente.' })
+    }
+  }
+  if (find() !== message) return response.sendStatus(204)
+  const previous = messages[channel]
+  messages[channel] = previous.filter((item) => item !== message)
+  try { saveMessages() }
+  catch (error) { messages[channel] = previous; throw error }
+  if (message.media?.kind === 'voice') chatMedia.removeVoice(message.media.id)
+  return response.sendStatus(204)
+})
+
+function addChatMessage(channel, member, installationId, body, media) {
+  const message = { id: crypto.randomUUID(), author: member.name, installationId, body, createdAt: new Date().toISOString(), ...(media && { media }) }
+  const previous = messages[channel] ?? []
+  const evicted = previous.slice(0, Math.max(0, previous.length - 499))
+  messages[channel] = [...previous.slice(-499), message]
+  try { saveMessages() }
+  catch (error) { messages[channel] = previous; throw error }
+  for (const old of evicted) if (old.media?.kind === 'voice') chatMedia.removeVoice(old.media.id)
+  return message
+}
 
 function validateInstallation(installationId, participantName) {
   if (typeof installationId !== 'string' || !/^[a-z0-9-]{16,100}$/i.test(installationId)) return 'Não foi possível identificar esta instalação.'
@@ -536,7 +630,7 @@ app.post('/token', async (request, response) => {
 
   rememberMemberHeartbeat(installationId)
   const token = new AccessToken(apiKey, apiSecret, { identity: installationId, name: participantName.trim(), ttl: '8h' })
-  token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true })
+  token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true })
   return response.json({ token: await token.toJwt() })
 })
 

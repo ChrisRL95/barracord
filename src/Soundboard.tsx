@@ -3,10 +3,11 @@ import type { FormEvent } from 'react'
 import { ConnectionState, RoomEvent } from 'livekit-client'
 import type { Room } from 'livekit-client'
 import { decodeSound, encodeSound, soundSampleRate } from './soundboardAudio'
+import SoundboardIcon from './SoundboardIcon'
 import './Soundboard.css'
 
 type Sound = { id: string; name: string; emoji: string; author: string; owner: string; duration: number }
-type Props = { endpoint: string; installationId: string; room: Room | null; deafened: boolean; speaker: string; compact: boolean }
+type Props = { endpoint: string; installationId: string; room: Room | null; deafened: boolean; speaker: string; compact: boolean; volume: number; onPlayingChange: (identity: string | null) => void }
 const topic = 'barracord.soundboard.v1'
 const soundId = /^[a-f0-9-]{36}$/
 const formatTime = (seconds: number) => seconds.toFixed(2).replace('.', ',') + ' s'
@@ -191,12 +192,17 @@ function SoundEditor({ cancel, save, speaker }: {
   </form>
 }
 
-export default function Soundboard({ endpoint, installationId, room, deafened, speaker, compact }: Props) {
+export default function Soundboard({ endpoint, installationId, room, deafened, speaker, compact, volume, onPlayingChange }: Props) {
   const dialog = useRef<HTMLDialogElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const search = useRef<HTMLInputElement>(null)
   const activeAudio = useRef<HTMLAudioElement | null>(null)
+  const volumeRef = useRef(volume)
+  useEffect(() => {
+    volumeRef.current = volume
+    if (activeAudio.current) activeAudio.current.volume = volume / 100
+  }, [volume])
   const lastPlay = useRef(-Infinity)
   const [sounds, setSounds] = useState<Sound[]>([])
   const [editing, setEditing] = useState(false)
@@ -246,22 +252,37 @@ export default function Soundboard({ endpoint, installationId, room, deafened, s
   }, [endpoint, installationId])
 
   const stopPlayback = useCallback(() => {
-    activeAudio.current?.pause()
-    if (activeAudio.current) activeAudio.current.src = ''
+    const audio = activeAudio.current
     activeAudio.current = null
-  }, [])
+    if (audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+    }
+    onPlayingChange(null)
+  }, [onPlayingChange])
 
-  const play = useCallback(async (id: string) => {
+  const play = useCallback(async (id: string, identity: string) => {
     stopPlayback()
     const audio = new Audio(url('/' + id + '/audio').href)
+    audio.volume = volumeRef.current / 100
     activeAudio.current = audio
+    const report = (playing: boolean) => {
+      if (activeAudio.current === audio) onPlayingChange(playing ? identity : null)
+    }
+    audio.addEventListener('playing', () => report(true))
+    for (const event of ['pause', 'waiting', 'ended', 'error']) {
+      audio.addEventListener(event, () => report(false))
+    }
     try {
       await playOnDevice(audio, speaker)
       if (activeAudio.current !== audio) audio.pause()
     } catch (error) {
-      if (activeAudio.current === audio) throw error
+      if (activeAudio.current === audio) {
+        stopPlayback()
+        throw error
+      }
     }
-  }, [speaker, stopPlayback, url])
+  }, [onPlayingChange, speaker, stopPlayback, url])
 
   useEffect(() => {
     if (!room || deafened) return
@@ -269,7 +290,7 @@ export default function Soundboard({ endpoint, installationId, room, deafened, s
       if (!participant || participant.identity === installationId || eventTopic !== topic || bytes.length !== 36) return
       const id = new TextDecoder().decode(bytes)
       if (!soundId.test(id) || !takePlaybackSlot(lastPlay)) return
-      void play(id).catch(() => {})
+      void play(id, participant.identity).catch(() => {})
     }
     room.on(RoomEvent.DataReceived, receive)
     room.on(RoomEvent.Disconnected, stopPlayback)
@@ -317,7 +338,7 @@ export default function Soundboard({ endpoint, installationId, room, deafened, s
     if (!room || room.state !== ConnectionState.Connected || deafened || !takePlaybackSlot(lastPlay)) return
     setError('')
     try {
-      await Promise.all([play(sound.id), room.localParticipant.publishData(new TextEncoder().encode(sound.id), { reliable: true, topic })])
+      await Promise.all([play(sound.id, installationId), room.localParticipant.publishData(new TextEncoder().encode(sound.id), { reliable: true, topic })])
     } catch { setError('Não foi possível tocar este som. Atualize a lista e confira a saída de áudio.') }
   }
 
@@ -327,9 +348,7 @@ export default function Soundboard({ endpoint, installationId, room, deafened, s
     <button ref={trigger} className={compact ? 'round-control sb-call-control' : 'sb-launch'} type="button"
       title="Soundboard" aria-label="Menu do Soundboard" popoverTarget="sb-library"
       onClick={positionPanel}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M3 11v2m4-5v8m5-12v16m5-12v8m4-5v2" />
-      </svg>
+      <SoundboardIcon />
       {!compact && <span>Soundboard</span>}
     </button>
     <div ref={panel} id="sb-library" className="sb-library" popover="auto" role="region" aria-label="Soundboard da turma"

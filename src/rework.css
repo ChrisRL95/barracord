@@ -16,6 +16,7 @@
 }
 
 .barracord-app {
+  --app-header-height: 62px;
   min-height: 100dvh;
   padding: 0;
   background: radial-gradient(circle at 72% -20%, #312947 0, transparent 34%), var(--black);
@@ -24,7 +25,7 @@
 
 .app-header {
   box-sizing: border-box;
-  height: 62px;
+  height: var(--app-header-height);
   padding: 0 22px;
   gap: 12px;
   border-bottom: 1px solid var(--line);
@@ -42,11 +43,18 @@
 .room-layout {
   width: 100%;
   max-width: none;
-  min-height: calc(100dvh - 62px);
+  min-height: calc(100dvh - var(--app-header-height));
   margin: 0;
   gap: 0;
   grid-template-columns: 248px minmax(0, 1fr) 252px;
 }
+
+.room-layout.chat-layout {
+  height: calc(100dvh - var(--app-header-height));
+  grid-template-rows: minmax(0, 1fr);
+}
+.chat-layout .stage-card { height: 100%; }
+.chat-layout .stage-head, .text-composer { flex-shrink: 0; }
 
 .room-nav, .members-panel, .stage-card {
   box-sizing: border-box;
@@ -155,11 +163,20 @@
 .member-audio-menu label { display: block; margin-top: 6px; border-top: 1px solid #40374f; padding: 9px 4px 2px; color: #bcb3cb; font-size: 10px; }.member-audio-menu output { float: right; color: #e4dbf7; font: 9px 'DM Mono', monospace; }.member-audio-menu input { width: 100%; margin: 8px 0 0; accent-color: var(--violet-hover); }
 .member-status.streaming { color: #e9a6c4; }.member-status.streaming::before { background: var(--live); box-shadow: 0 0 9px #d65b8d; }.member-status.em-call::before { background: var(--online); box-shadow: 0 0 8px #57b68a; }.member-status.online::before { background: var(--online); }
 .voice-channel-member { min-height: 32px; gap: 8px; padding: 3px 6px; border-radius: 7px; font-size: 13px; }
-.voice-channel-avatar { width: 24px; height: 24px; font-size: 11px; }
+.voice-channel-avatar { width: 24px; height: 24px; font-size: 11px; transition: box-shadow 140ms ease; }
 .voice-channel-member small { margin-left: 4px; font-size: 12px; }
-.voice-channel-member.speaking { background: #253c35; color: #d9f5e6; box-shadow: inset 3px 0 0 var(--online); }
-.voice-channel-member.speaking .voice-channel-avatar { box-shadow: 0 0 0 2px var(--online); }
-.voice-speaking-indicator { margin-left: auto; color: #8cddb0; font-size: 13px; letter-spacing: 1px; }
+.voice-channel-member.speaking .voice-channel-avatar { box-shadow: 0 0 0 1.5px var(--online); }
+@media (prefers-reduced-motion: reduce) {
+  .voice-channel-avatar { transition: none; }
+}
+.voice-member-status { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
+.voice-member-status > span { display: grid; place-items: center; }
+.voice-member-status svg { width: 14px; height: 14px; }
+.voice-member-muted { color: #d98aa9; }
+.voice-member-live { width: 20px; height: 16px; border-radius: 4px; background: var(--live); color: #fff4f9; }
+.voice-member-live svg { width: 12px; height: 12px; stroke-width: 2.2; }
+.voice-member-status .voice-soundboard-indicator { color: #c39cff; }
+.voice-member-status .voice-soundboard-indicator svg { width: 16px; height: 16px; }
 .avatar-tone-0 { background: #3c3158; color: #d9ccff; }.avatar-tone-1 { background: #23424a; color: #a8e7e0; }.avatar-tone-2 { background: #4c315f; color: #e1c2f7; }.avatar-tone-3 { background: #55472c; color: #f7e099; }.avatar-tone-4 { background: #28503a; color: #b9ebc9; }.avatar-tone-5 { background: #583044; color: #f3bcd2; }.avatar-tone-self { background: var(--violet); color: #f7f2ff; }
 
 .text-channel-stage { border-color: #2c2738; background: #15121d; }.text-channel-intro span { color: #c5b7e9; }.text-channel-intro strong, .text-message strong { color: #f0ecf6; }.text-composer { border-color: #353043; background: #211d2b; }.text-composer input { color: #f3eff8; }.text-composer input:focus { border-color: #66558e; }.text-composer button { background: var(--violet); color: #f8f5ff; }
@@ -214,11 +231,40 @@
 .control-menu-select select { min-height: 38px; font-size: 13px; }
 .stage-head span, .stage-message, .quality { font-size: 13px; line-height: 1.5; }
 .stage-head { gap: 12px; flex-wrap: wrap; }
+.chat-whatsapp-action {
+  border: 1px solid #554778;
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: var(--violet-soft);
+  color: #f2eaff;
+  font-size: 13px;
+  text-decoration: none;
+}
+.chat-whatsapp-action:hover { background: var(--violet); }
 .stage-message i { background: #aaa3b8; box-shadow: none; }
 .stage-message.error { color: #ffc1ce; }.stage-message.error i { background: #ed819d; }
 .stage-message.warning { color: #f0d59d; }.stage-message.warning i { background: #e2b35e; }
 .stage-message.pending:not(.error) i { background: #bba4ea; }
 .text-message p, .text-composer input { font-size: 14px; line-height: 1.6; }
+.chat-preview-marker { display: block; }
+.chat-link-preview {
+  display: grid;
+  gap: 4px;
+  width: fit-content;
+  max-width: min(100%, 440px);
+  margin-top: 7px;
+  padding: 8px 12px;
+  border: 1px solid #44384f;
+  border-left: 3px solid #78659a;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.chat-link-preview:hover { border-color: #9e83c4; }
+.chat-link-preview small { color: #c9b5e8; }
+.chat-link-preview span { color: var(--muted); font-size: 13px; }
 .text-message time, .copy-chat-message, .member-status, .remote-member-info small { font-size: 12px; }
 .remote-member-info strong { font-size: 14px; }
 .settings-tabs button, .admin-tabs button { min-height: 40px; font-size: 13px; }
@@ -231,6 +277,12 @@
 .settings-rework-card > header button, .admin-rework-card > header button { width: 38px; height: 38px; }
 .settings-rework-card > footer button, .admin-rework-card > footer button { min-height: 40px; font-size: 13px; }
 .member-audio-menu { width: 230px; }.member-audio-menu header { font-size: 13px; }.member-audio-menu output { font-size: 12px; }
+.member-context-menu { position: fixed; right: auto; bottom: auto; z-index: 75; max-height: calc(100vh - 16px); overflow-y: auto; }
+.chat-context-menu { position: fixed; right: auto; bottom: auto; z-index: 75; width: 180px; }
+.chat-context-menu > button { color: #ffb7cc; }
+.attention-toast { right: 24px; bottom: 84px; }
+.attention-toast .attention-avatar { width: 32px; height: 32px; flex: none; border-radius: 50%; }
+.attention-toast > .attention-avatar { padding: 0; background: var(--violet); color: #f5f0ff; font-size: 13px; }
 .stream-invite-card { box-sizing: border-box; border-color: #554778; background: #211d2bf5; }
 .stream-invite-icon { border-color: #665385; background: #3d325c; color: #ece0ff; }
 .stream-invite-card small { font-size: 12px; color: #c9b5e8; }.stream-invite-card p { font-size: 14px; color: #bdb5cb; }
@@ -264,13 +316,28 @@
 }
 
 @media (max-width: 720px) {
-  .app-header { height: 54px; padding: 0 12px; }.brand small, .network-status { display: none; }
+  .barracord-app { --app-header-height: 54px; }
+  .app-header { padding: 0 12px; }.brand small, .network-status { display: none; }
   .room-layout { min-height: calc(100dvh - 54px); grid-template-columns: 72px minmax(0, 1fr); }.room-nav-title { justify-content: center; min-height: 54px; padding: 0; }.room-nav-title strong, .room-nav-title button, .nav-label, .room-pill:not(.active) { display: none; }.room-nav-mark { width: 34px; height: 34px; }.channel-navigation { padding: 12px 8px; }.room-pill.active { display: grid; width: 42px; min-height: 42px; place-items: center; padding: 0; }.room-pill.active span { margin: 0; }.room-pill.active { font-size: 0; }.room-pill.active span { font-size: 20px; }
   .room-nav .control-more-menu { right: -8px; }.voice-channel-members { display: none; }.nav-call-status, .room-nav .screen-control span, .nav-user > div, .nav-user > button { display: none; }.nav-call-panel { padding: 8px; }.room-nav .control-dock { flex-direction: column; align-items: center; }.room-nav .round-control, .room-nav .leave-button, .room-nav .watch-fullscreen-control, .room-nav .screen-control { width: 42px; flex: 0 0 42px; }.room-nav .screen-control { padding: 0; }.room-nav .screen-control svg { width: 17px; height: 17px; }.nav-user { justify-content: center; padding: 8px; }
   .stage-card { padding: 13px; }.stream-stage { min-height: 360px; }.quality { display: none; }
   .room-nav .control-dock.voice-actions { grid-template-columns: 1fr; }
   .settings-rework-overlay { padding: 10px; }.settings-rework-card { max-height: calc(100dvh - 20px); }.settings-rework-card > header { padding: 16px 16px 12px; }.settings-tab-content { padding: 0 16px; }.settings-rework-card > footer { padding: 11px 16px 14px; }
   .admin-rework-overlay { padding: 10px; }.admin-rework-card { max-height: calc(100dvh - 20px); }.admin-rework-card > header { padding: 16px 16px 12px; }.admin-tab-content { padding: 0 16px; }.admin-rework-card > footer { padding: 11px 16px 14px; }.admin-summary-rework { grid-template-columns: 1fr; }
+}
+
+.settings-tabs { overflow-x: auto; }
+.shortcut-settings .shortcut-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; gap: 8px; align-items: end; margin: 14px 0; }
+.shortcut-settings .shortcut-row label { margin: 0; }
+.shortcut-binding { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.shortcut-binding kbd { color: #dfd0fa; overflow-wrap: anywhere; }
+.shortcut-settings button { border: 1px solid #4b415b; border-radius: 7px; padding: 6px 8px; background: #211d2b; color: #e7dcf7; }
+.shortcut-settings .shortcut-enable { display: flex; align-items: center; gap: 4px; align-self: center; }
+.shortcut-enable input { accent-color: var(--violet-hover); }
+.shortcut-settings .shortcut-background { grid-column: 1 / -1; }
+@media (max-width: 560px) {
+  .shortcut-settings .shortcut-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .shortcut-row > label:first-child, .shortcut-binding { grid-column: 1 / -1; }
 }
 
 /* Presença ao vivo: entrada e saída suaves na lista de cada canal de voz. */
