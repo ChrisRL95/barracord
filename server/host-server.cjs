@@ -156,6 +156,19 @@ app.get('/health', async (_request, response) => {
   }
 })
 
+// Microfone mutado e áudio silenciado de quem está numa call. O LiveKit não
+// avisa por webhook quando isso muda, então cada cliente manda o seu estado
+// no heartbeat (null quando sai da call) e a mudança vai na hora para todos.
+const memberVoiceStates = new Map()
+
+function rememberVoiceState(installationId, voice) {
+  const previous = memberVoiceStates.get(installationId)
+  const next = voice && typeof voice === 'object' ? { muted: voice.muted === true, deafened: voice.deafened === true } : null
+  if (next) memberVoiceStates.set(installationId, next)
+  else memberVoiceStates.delete(installationId)
+  if (previous?.muted !== next?.muted || previous?.deafened !== next?.deafened) schedulePresenceRefresh()
+}
+
 function rememberMemberHeartbeat(installationId, away = false) {
   const previous = memberHeartbeats.get(installationId)
   memberHeartbeats.set(installationId, { lastSeen: Date.now(), away: Boolean(away) })
@@ -181,6 +194,10 @@ let presenceSnapshotJson = ''
 let presenceRefreshRunning = null
 let presenceRefreshQueued = false
 
+function isSharingScreen(participant) {
+  return Boolean(participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'))
+}
+
 async function readPresence() {
   const presence = await Promise.all(channels.voice.map(async (channel) => {
     const participants = await roomService.listParticipants(channel.id)
@@ -189,11 +206,21 @@ async function readPresence() {
   const channelsPresence = Object.fromEntries(presence.map(([channelId, participants]) => [channelId, participants
     .slice()
     .sort((a, b) => Number(a.joinedAt ?? 0) - Number(b.joinedAt ?? 0))
-    .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))]))
+    .map((participant) => {
+      const voice = memberVoiceStates.get(participant.identity)
+      return {
+        identity: participant.identity,
+        name: participant.name || participant.identity,
+        // Só vai no JSON o que estiver ligado, para não pesar a presença.
+        ...(voice?.muted && { muted: true }),
+        ...(voice?.deafened && { deafened: true }),
+        ...(isSharingScreen(participant) && { sharing: true }),
+      }
+    })]))
   const callsByInstallation = new Map()
   presence.forEach(([channelId, participants]) => participants.forEach((participant) => callsByInstallation.set(participant.identity, {
     channelId,
-    streaming: participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'),
+    streaming: isSharingScreen(participant),
   })))
   const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, avatarRevision: profiles.avatarRevision(installationId), ...activeMemberStatus(installationId, callsByInstallation) }))
   return { channels: channelsPresence, members: memberList }
@@ -251,6 +278,8 @@ app.post('/presence/heartbeat', async (request, response) => {
   const installationId = request.body?.installationId
   if (!getAuthorizedMember(installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   rememberMemberHeartbeat(installationId, request.body?.away)
+  // Clientes antigos não mandam o campo; aí o estado fica como está.
+  if (request.body && 'voice' in request.body) rememberVoiceState(installationId, request.body.voice)
   // Devolver a presença aqui poupa o cliente sem stream de um segundo pedido.
   const snapshot = presenceSnapshot && presenceSubscribers.size ? presenceSnapshot : await schedulePresenceRefresh()
   return response.json(snapshot ? { ok: true, ...snapshot } : { ok: true })
@@ -535,6 +564,8 @@ app.post('/token', async (request, response) => {
   }
 
   rememberMemberHeartbeat(installationId)
+  // Uma entrada nova começa sem o estado da call anterior até o cliente avisar.
+  rememberVoiceState(installationId, null)
   const token = new AccessToken(apiKey, apiSecret, { identity: installationId, name: participantName.trim(), ttl: '8h' })
   token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true })
   return response.json({ token: await token.toJwt() })

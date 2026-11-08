@@ -160,6 +160,13 @@
 .voice-channel-member.speaking { background: #253c35; color: #d9f5e6; box-shadow: inset 3px 0 0 var(--online); }
 .voice-channel-member.speaking .voice-channel-avatar { box-shadow: 0 0 0 2px var(--online); }
 .voice-speaking-indicator { margin-left: auto; color: #8cddb0; font-size: 13px; letter-spacing: 1px; }
+.voice-member-status { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
+.voice-speaking-indicator + .voice-member-status { margin-left: 4px; }
+.voice-member-status > span { display: grid; place-items: center; }
+.voice-member-status svg { width: 14px; height: 14px; }
+.voice-member-muted { color: #d98aa9; }
+.voice-member-live { width: 20px; height: 16px; border-radius: 4px; background: var(--live); color: #fff4f9; }
+.voice-member-live svg { width: 12px; height: 12px; stroke-width: 2.2; }
 .avatar-tone-0 { background: #3c3158; color: #d9ccff; }.avatar-tone-1 { background: #23424a; color: #a8e7e0; }.avatar-tone-2 { background: #4c315f; color: #e1c2f7; }.avatar-tone-3 { background: #55472c; color: #f7e099; }.avatar-tone-4 { background: #28503a; color: #b9ebc9; }.avatar-tone-5 { background: #583044; color: #f3bcd2; }.avatar-tone-self { background: var(--violet); color: #f7f2ff; }
 
 .text-channel-stage { border-color: #2c2738; background: #15121d; }.text-channel-intro span { color: #c5b7e9; }.text-channel-intro strong, .text-message strong { color: #f0ecf6; }.text-composer { border-color: #353043; background: #211d2b; }.text-composer input { color: #f3eff8; }.text-composer input:focus { border-color: #66558e; }.text-composer button { background: var(--violet); color: #f8f5ff; }
