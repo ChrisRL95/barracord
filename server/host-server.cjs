@@ -175,6 +175,8 @@ function activeMemberStatus(installationId, callsByInstallation) {
 // clientes. O webhook do LiveKit pede uma nova leitura assim que alguém entra,
 // sai ou começa a transmitir, e o resultado vai para todos pelo /presence/stream.
 const presenceSubscribers = new Set()
+const attentionSubscribers = new Map()
+const attentionCooldowns = new Map()
 const presenceSafetyIntervalMs = 5_000
 let presenceSnapshot = null
 let presenceSnapshotJson = ''
@@ -264,23 +266,48 @@ app.get('/presence', async (request, response) => {
 })
 
 app.get('/presence/stream', (request, response) => {
-  if (!getAuthorizedMember(request.query.installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
+  const { installationId, attention } = request.query
+  if (!getAuthorizedMember(installationId)) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   response.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
   response.flushHeaders()
   response.write('retry: 2000\n\n')
   presenceSubscribers.add(response)
+  if (attention === '1') attentionSubscribers.set(response, installationId)
   const keepAlive = setInterval(() => response.write(': ping\n\n'), 20_000)
   request.on('close', () => {
     clearInterval(keepAlive)
     presenceSubscribers.delete(response)
+    attentionSubscribers.delete(response)
   })
   // Sem leitura ainda, a primeira atualização já chega a este assinante pelo broadcast.
   if (presenceSnapshotJson) sendPresence(response, presenceSnapshotJson)
   else void schedulePresenceRefresh()
 })
 
+app.post('/presence/attention', (request, response) => {
+  const { installationId, targetId } = request.body ?? {}
+  const sender = getAuthorizedMember(installationId)
+  if (!sender) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
+  if (installationId === targetId || !getAuthorizedMember(targetId)) {
+    return response.status(400).json({ error: 'Escolha outro membro da Barraca.' })
+  }
+  const recipients = [...attentionSubscribers].filter(([stream, id]) => id === targetId && !stream.destroyed && !stream.writableEnded)
+  if (!recipients.length) return response.status(409).json({ error: 'Esse membro está com o Barracord fechado ou indisponível.' })
+
+  const now = Date.now()
+  for (const [id, until] of attentionCooldowns) if (until <= now) attentionCooldowns.delete(id)
+  if (attentionCooldowns.has(installationId) || attentionCooldowns.has(targetId)) {
+    return response.status(429).json({ error: 'Aguarde alguns segundos para chamar atenção novamente.' })
+  }
+  attentionCooldowns.set(installationId, now + 10_000)
+  attentionCooldowns.set(targetId, now + 10_000)
+  const event = `event: attention\ndata: ${JSON.stringify({ name: sender.name })}\n\n`
+  for (const [stream] of recipients) stream.write(event)
+  return response.status(204).end()
+})
+
 function getAuthorizedMember(installationId) {
-  return typeof installationId === 'string' ? members[installationId] : null
+  return typeof installationId === 'string' && Object.hasOwn(members, installationId) ? members[installationId] : null
 }
 
 function requireHostCode(request, response) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } from 'livekit-client'
 import type { Participant } from 'livekit-client'
 import { captureAppAudio } from './appAudio'
@@ -15,6 +16,7 @@ import type { ProfileTarget } from './MemberProfile'
 import UpdateButton from './UpdateButton'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
+import attentionSound from './assets/attention.ogg?url'
 import { MicrophoneController, configureMicrophoneNoise, loadNoiseMode, microphoneCaptureOptions, noiseModeLabels } from './noiseSuppression'
 import type { NoiseMode } from './noiseSuppression'
 import './App.css'
@@ -248,9 +250,11 @@ function App() {
   const [streamPublisher, setStreamPublisher] = useState('')
   const [watchingStream, setWatchingStream] = useState(false)
   const [speakingIdentities, setSpeakingIdentities] = useState<string[]>([])
+  const [soundboardIdentity, setSoundboardIdentity] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<'audio' | 'stream' | 'barraca'>('audio')
-  const [memberAudioMenuId, setMemberAudioMenuId] = useState<string | null>(null)
+  const [memberMenu, setMemberMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  const [attentionNotice, setAttentionNotice] = useState<{ text: string; error?: boolean } | null>(null)
   const [streamFullscreen, setStreamFullscreen] = useState(false)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [microphoneDevice, setMicrophoneDevice] = useState(() => localStorage.getItem('barracord.microphoneDevice') ?? 'default')
@@ -549,6 +553,31 @@ function App() {
   applyPresenceRef.current = applyPresence
 
   useEffect(() => {
+    if (!attentionNotice) return
+    const timer = window.setTimeout(() => setAttentionNotice(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [attentionNotice])
+
+  async function callAttention(targetId: string, name: string) {
+    setMemberMenu(null)
+    try {
+      const endpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence/attention')
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ installationId: getInstallationId(), targetId }),
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => null)
+        throw new Error(body?.error || 'Não foi possível enviar o aviso. Confira se o anfitrião está atualizado.')
+      }
+      setAttentionNotice({ text: `Aviso enviado para ${name}.` })
+    } catch (cause) {
+      setAttentionNotice({ text: cause instanceof Error ? cause.message : 'Não foi possível enviar o aviso.', error: true })
+    }
+  }
+
+  useEffect(() => {
     if (!authorizedInstallation) return
     let cancelled = false
     let stream: EventSource | null = null
@@ -557,6 +586,7 @@ function App() {
     let heartbeatTimer: number | null = null
     const presenceEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence')
     const installationId = getInstallationId()
+    const attentionAudio = new Audio(attentionSound)
 
     // The heartbeat keeps this computer "online". While the live stream is up
     // it only needs to beat every 15 s; without it (older host, network hiccup)
@@ -586,7 +616,22 @@ function App() {
 
     const openStream = () => {
       if (cancelled || typeof EventSource === 'undefined') return
-      stream = new EventSource(`${presenceEndpoint}/stream?${new URLSearchParams({ installationId }).toString()}`)
+      stream = new EventSource(`${presenceEndpoint}/stream?${new URLSearchParams({ installationId, attention: '1' }).toString()}`)
+      stream.addEventListener('attention', (event) => {
+        let name: unknown
+        try { name = JSON.parse((event as MessageEvent<string>).data)?.name } catch { return }
+        if (cancelled || typeof name !== 'string') return
+        setAttentionNotice({ text: `${name} chamou sua atenção.` })
+        const output = attentionAudio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
+        const speaker = localStorage.getItem('barracord.speakerDevice') ?? 'default'
+        void (async () => {
+          await output.setSinkId?.(speaker).catch(() => {})
+          if (!cancelled) {
+            output.currentTime = 0
+            await output.play()
+          }
+        })().catch(() => {})
+      })
       stream.addEventListener('presence', (event) => {
         streamLive = true
         try { applyPresenceRef.current(JSON.parse((event as MessageEvent<string>).data) as { channels?: ChannelPresence; members?: PresenceMember[] }) } catch { /* ignore a malformed update */ }
@@ -610,10 +655,28 @@ function App() {
     return () => {
       cancelled = true
       stream?.close()
+      attentionAudio.pause()
       if (streamRetry !== null) window.clearTimeout(streamRetry)
       if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer)
     }
   }, [authorizedInstallation, tokenEndpoint])
+
+  useEffect(() => {
+    if (!memberMenu) return
+    const close = () => setMemberMenu(null)
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Element && !event.target.closest('.member-context-menu')) close()
+    }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', escape)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', escape)
+      window.removeEventListener('resize', close)
+    }
+  }, [memberMenu])
 
   useEffect(() => {
     if (!authorizedInstallation) return
@@ -2007,6 +2070,10 @@ function App() {
     {adminOpen && renderAdminReworkPanel()}
 
     {window.chriscordDesktop && isHostApp && hostStatus.state !== 'running' && <section className={`host-availability-notice ${hostStatus.state}`} role="status"><div><small>{isDevelopment ? 'TESTE LOCAL' : 'ANFITRIÃO'}</small><strong>{hostStateLabel}</strong><span>{hostStatus.state === 'starting' ? hostIsRecovering ? 'A Barraca caiu, mas está tentando voltar sozinha. Aguarde alguns segundos.' : 'Preparando voz, chat e transmissão para a galera.' : hostStatus.state === 'error' ? hostStateDetail : 'Abra a Barraca neste PC para deixar a galera entrar.'}</span></div>{hostStatus.state !== 'starting' && <button type="button" onClick={() => void toggleHost()}>{hostActionLabel} →</button>}</section>}
+    {attentionNotice && <aside className={`host-recovery-toast attention-toast ${attentionNotice.error ? 'error' : ''}`} role="status">
+      <i aria-hidden="true">!</i><div><small>CHAMAR ATENÇÃO</small><strong>{attentionNotice.text}</strong></div>
+      <button type="button" onClick={() => setAttentionNotice(null)} aria-label="Fechar aviso">?</button>
+    </aside>}
     {hostRecoveryNotice && <aside className={`host-recovery-toast ${hostRecoveryNotice.kind}`} role="status"><i>{hostRecoveryNotice.kind === 'success' ? '✓' : '!'}</i><div><small>{hostRecoveryNotice.kind === 'success' ? 'RECUPERAÇÃO CONCLUÍDA' : 'AÇÃO NECESSÁRIA'}</small><strong>{hostRecoveryNotice.text}</strong></div><button type="button" onClick={() => setHostRecoveryNotice(null)} aria-label="Fechar aviso">×</button></aside>}
     {barracaUnavailable && <section className="barraca-unavailable-notice" role="status"><div><small>CONEXÃO COM A BARRACA</small><strong>A Barraca não respondeu.</strong><span>Ela pode estar fechada, ou a Rede da Barraca ainda pode estar iniciando neste computador.</span></div><button type="button" onClick={() => void verifyBarracaAccess()}>Tentar novamente</button></section>}
 
@@ -2022,7 +2089,7 @@ function App() {
             const active = activeVoiceChannel === channel.id && stageView === 'voice'
             return <section className={`voice-channel-entry ${active ? 'active' : ''}`} key={channel.id}>
               <button className={`room-pill voice-pill ${active ? 'active' : ''}`} type="button" onClick={() => requestVoiceChannel(channel.id)} disabled={isConnecting || barracaAccess !== 'available'} title={people.map((person) => person.name).join(', ')}><span>◉</span>{channel.name}<b>{activeVoiceChannel === channel.id ? 'na call' : joiningVoiceChannel === channel.id ? 'entrando…' : people.length || ''}</b></button>
-              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} renderAvatar={(person) => memberAvatar(person.identity, person.name, 'voice-channel-avatar')} />
+              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} soundboardIdentity={activeVoiceChannel === channel.id ? soundboardIdentity : null} renderAvatar={(person) => memberAvatar(person.identity, person.name, 'voice-channel-avatar')} />
             </section>
           })}
         </div>
@@ -2036,7 +2103,7 @@ function App() {
                 <button className={`round-control ${microphoneOn ? 'enabled' : ''}`} type="button" onClick={toggleMicrophone} disabled={!connected} title={microphoneOn ? 'Microfone ligado' : 'Microfone desligado'} aria-label={microphoneOn ? 'Desligar microfone' : 'Ligar microfone'}><ControlIcon name={microphoneOn ? 'microphone' : 'microphoneOff'} /></button>
                 <button className={`round-control deafen-control ${deafened ? 'deafened' : ''}`} type="button" onClick={() => void toggleDeafen()} disabled={!connected} title={deafened ? 'Voltar a ouvir' : 'Silenciar tudo'} aria-label={deafened ? 'Voltar a ouvir a call' : 'Silenciar tudo'} aria-pressed={deafened}><ControlIcon name={deafened ? 'deafen' : 'headphones'} /></button>
               </>}
-              <Soundboard endpoint={tokenEndpoint} installationId={getInstallationId()} room={connected && !isReconnecting ? roomRef.current : null} deafened={deafened} speaker={speakerDevice} compact={connected} />
+              <Soundboard endpoint={tokenEndpoint} installationId={getInstallationId()} room={connected && !isReconnecting ? roomRef.current : null} deafened={deafened} speaker={speakerDevice} compact={connected} onPlayingChange={setSoundboardIdentity} />
               {connected && <button className="leave-button" type="button" onClick={disconnect} title="Sair da call" aria-label="Sair da call"><ControlIcon name="leave" /></button>}
             </div>
             {connected && <button className={`screen-control ${isSharing ? 'broadcasting' : ''}`} type="button" onClick={toggleScreenShare} title={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'} aria-label={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}><ControlIcon name="screen" /><span>{isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}</span></button>}
@@ -2090,10 +2157,22 @@ function App() {
             const canAdjustAudio = !isSelf && (member.status === 'em-call' || member.status === 'streaming')
             const audio = participantAudio[member.installationId] ?? { volume: 100, muted: false }
             const statusText = member.status === 'streaming' ? `transmitindo em ${channelName}` : member.status === 'em-call' ? `em ${channelName}` : member.status === 'online' ? 'na Barraca' : member.status === 'away' ? 'ausente' : 'offline'
-            return <article className={`member directory-member ${isSelf ? 'self' : ''}`} key={member.installationId} onContextMenu={(event) => { if (!canAdjustAudio) return; event.preventDefault(); setMemberAudioMenuId((current) => current === member.installationId ? null : member.installationId) }} title={canAdjustAudio ? 'Clique com o botão direito para ajustar o áudio' : undefined}>
+            return <article className={`member directory-member ${isSelf ? 'self' : ''}`} key={member.installationId} onContextMenu={(event) => {
+              if (isSelf) return
+              event.preventDefault()
+              setMemberMenu({ id: member.installationId, x: event.clientX, y: event.clientY })
+            }} title={!isSelf ? 'Clique com o botão direito para ver as opções' : undefined}>
               {memberAvatar(member.installationId, member.name, 'member-avatar')}
               <div className="remote-member-info"><strong>{member.name} {isSelf && <small>você</small>}</strong><span className={`member-status ${member.status}`}>{statusText}</span></div>
-              {canAdjustAudio && memberAudioMenuId === member.installationId && <section className="member-audio-menu" role="menu" aria-label={`Áudio de ${member.name}`} onContextMenu={(event) => event.preventDefault()}><header><strong>Áudio de {member.name}</strong><button type="button" onClick={() => setMemberAudioMenuId(null)} aria-label="Fechar">×</button></header><button type="button" className={audio.muted ? 'muted' : ''} onClick={() => changeParticipantAudio(member.installationId, { muted: !audio.muted })}><ControlIcon name={audio.muted ? 'soundOff' : 'sound'} />{audio.muted ? 'Ouvir novamente' : 'Silenciar para mim'}</button><label>Volume <output>{audio.volume}%</output><input type="range" min="0" max="100" value={audio.volume} onChange={(event) => changeParticipantAudio(member.installationId, { volume: Number(event.target.value) })} aria-label={`Volume de ${member.name}`} /></label></section>}
+              {memberMenu?.id === member.installationId && createPortal(
+                <section className="member-audio-menu member-context-menu" aria-label={`Opções de ${member.name}`}
+                  style={{ left: Math.max(8, Math.min(memberMenu.x, window.innerWidth - 238)), top: Math.max(8, Math.min(memberMenu.y, window.innerHeight - (canAdjustAudio ? 175 : 92))) }}
+                  onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
+                  <header><strong>{member.name}</strong><button type="button" onClick={() => setMemberMenu(null)} aria-label="Fechar">?</button></header>
+                  <button type="button" onClick={() => void callAttention(member.installationId, member.name)}><ControlIcon name="sound" />Chamar atenção</button>
+                  {canAdjustAudio && <><button type="button" className={audio.muted ? 'muted' : ''} onClick={() => changeParticipantAudio(member.installationId, { muted: !audio.muted })}><ControlIcon name={audio.muted ? 'soundOff' : 'sound'} />{audio.muted ? 'Ouvir novamente' : 'Silenciar para mim'}</button><label>Volume <output>{audio.volume}%</output><input type="range" min="0" max="100" value={audio.volume} onChange={(event) => changeParticipantAudio(member.installationId, { volume: Number(event.target.value) })} aria-label={`Volume de ${member.name}`} /></label></>}
+                </section>, document.body,
+              )}
             </article>
           })}
         </section>) : <div className="members-empty">A turma aparece aqui quando alguém entrar na Barraca.</div>}</div>
@@ -2104,6 +2183,7 @@ function App() {
     <div ref={remoteAudioRef} className="remote-audio-frame" aria-hidden="true" />
     {authorizedInstallation && profileTarget && <MemberProfile key={profileTarget.id} target={profileTarget} viewerId={viewerId}
       url={profileUrl(profileTarget.id)} close={() => setProfileTarget(null)}
+      callAttention={() => void callAttention(profileTarget.id, profileTarget.name)}
       saved={(avatarRevision) => setPresenceMembers((members) => members.map((member) => member.installationId === viewerId ? { ...member, avatarRevision } : member))} />}
 
     {linuxShareOpen && <LinuxSharePicker audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => { setLinuxShareOpen(false); setMessage('A escolha de tela foi cancelada.') }} onStart={(mode, ids) => void startLinuxShare(mode, ids)} />}
