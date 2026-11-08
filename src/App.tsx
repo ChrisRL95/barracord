@@ -10,6 +10,8 @@ import LinuxSharePicker from './LinuxSharePicker'
 import { isLinuxDesktop, systemText } from './platformText'
 import Soundboard from './Soundboard'
 import VoiceChannelMembers from './VoiceChannelMembers'
+import ControlIcon from './ControlIcon'
+import { playUiSound, preloadUiSounds, setUiSoundOutput } from './uiSounds'
 import type { VoicePerson } from './VoiceChannelMembers'
 import MemberProfile, { ProfileAvatar } from './MemberProfile'
 import type { ProfileTarget } from './MemberProfile'
@@ -41,7 +43,7 @@ type DesktopVideoConstraints = MediaTrackConstraints & {
   }
 }
 type HostStatus = { state: 'stopped' | 'starting' | 'running' | 'error'; message: string; tailnetIp: string | null; role: 'host' | 'guest' }
-type ChannelPresence = Record<string, Array<{ identity: string; name: string }>>
+type ChannelPresence = Record<string, Array<{ identity: string; name: string; muted?: boolean; deafened?: boolean; sharing?: boolean }>>
 type Channel = { id: string; name: string; protected: boolean }
 type ChannelCatalog = { text: Channel[]; voice: Channel[] }
 type TextMessage = { id: string; author: string; installationId: string; body: string; createdAt: string }
@@ -50,21 +52,6 @@ type AdminMember = { installationId: string; name: string; authorizedAt: string;
 type AdminInvite = { code: string; label: string; createdAt: string; expiresAt: string | null; usedAt: string | null; status: 'ativo' | 'usado' | 'revogado' | 'expirado'; activationReady?: boolean }
 type AdminData = { members: AdminMember[]; presence: ChannelPresence; channels: ChannelCatalog; invites: AdminInvite[]; metrics?: { streamCount: number; estimatedUploadMbps: number } }
 type SafeLogEntry = { at: string; level: 'info' | 'warning' | 'error'; event: string }
-type ControlIconName = 'microphone' | 'microphoneOff' | 'headphones' | 'deafen' | 'screen' | 'fullscreen' | 'settings' | 'leave' | 'sound' | 'soundOff'
-
-function ControlIcon({ name }: { name: ControlIconName }) {
-  const props = { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true }
-  if (name === 'microphone') return <svg {...props}><rect x="8" y="3" width="8" height="13" rx="4" /><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7" /></svg>
-  if (name === 'microphoneOff') return <svg {...props}><path d="M8.3 8.3V12a3.7 3.7 0 0 0 6.3 2.6M16 10.2V7a4 4 0 0 0-6.8-2.8M5.5 11.5a6.5 6.5 0 0 0 10.9 4.8M12 18v3M8.5 21h7M3 3l18 18" /></svg>
-  if (name === 'deafen' || name === 'headphones') return <svg {...props}><path d="M4 13a8 8 0 0 1 16 0v4a2 2 0 0 1-2 2h-2v-6h4M4 13v6h2v-6H4M8 20c.8.7 2.1 1 4 1" />{name === 'deafen' && <path d="M3 3l18 18" />}</svg>
-  if (name === 'screen') return <svg {...props}><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4M12 8v5M9.5 10.5 12 8l2.5 2.5" /></svg>
-  if (name === 'fullscreen') return <svg {...props}><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M4 16v4h4" /></svg>
-  if (name === 'settings') return <svg {...props}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.3 2.3-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2h-3.2v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1-2.3-2.3.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H4.7v-3.2h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L6 7.8l2.3-2.3.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5v-.2h3.2v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.3 2.3-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2V14h-.2a1.7 1.7 0 0 0-1.4 1Z" /></svg>
-  if (name === 'leave') return <svg {...props}><path d="M10 5H5v14h5M14 8l4 4-4 4M18 12H9" /></svg>
-  if (name === 'soundOff') return <svg {...props}><path d="M5 10v4h3l4 3V7l-4 3H5M3 3l18 18" /></svg>
-  return <svg {...props}><path d="M5 10v4h3l4 3V7l-4 3H5ZM16 9.5a4 4 0 0 1 0 5M18.5 7a7.5 7.5 0 0 1 0 10" /></svg>
-}
-
 function getInstallationId() {
   const stored = localStorage.getItem('barracord.installationId')
   if (stored) return stored
@@ -285,6 +272,19 @@ function App() {
   const [appVersion, setAppVersion] = useState(fallbackAppVersion)
   const [sharingQuality, setSharingQuality] = useState('')
   const nextShareQuality = { resolution: qualityProfile === 'smooth' || qualityProfile === 'gaming' ? 720 as const : 1080 as const, fps: qualityProfile === 'smooth' || qualityProfile === 'auto' ? 30 as const : 60 as const }
+
+  // O que os outros veem ao lado do seu nome no canal. Apertar para falar não
+  // conta como mutado: ali o microfone só fica desligado entre uma fala e outra.
+  const selfMicMuted = connected && (deafened || (voiceKeyMode !== 'push-to-talk' && !microphoneOn))
+  useEffect(() => {
+    const room = roomRef.current
+    if (!connected || isReconnecting || !room) return
+    const metadata = deafened ? 'deafened' : selfMicMuted ? 'muted' : 'unmuted'
+    void room.localParticipant.setMetadata(metadata).catch(() => {})
+  }, [connected, activeVoiceChannel, isReconnecting, selfMicMuted, deafened])
+
+  useEffect(() => { preloadUiSounds() }, [])
+  useEffect(() => { setUiSoundOutput(speakerDevice) }, [speakerDevice])
 
   useEffect(() => {
     const room = roomRef.current
@@ -591,7 +591,12 @@ function App() {
     // The heartbeat keeps this computer "online". While the live stream is up
     // it only needs to beat every 15 s; without it (older host, network hiccup)
     // it falls back to polling every 4 s and reads presence from the reply.
+    // One beat at a time: a beat asked for mid-flight runs right after it.
+    let beating = false
+    let beatAgain = false
     const heartbeat = async () => {
+      if (beating) { beatAgain = true; return }
+      beating = true
       try {
         const away = document.hidden || Date.now() - lastActivityRef.current >= 5 * 60_000
         const response = await fetch(`${presenceEndpoint}/heartbeat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ installationId, away }) })
@@ -606,7 +611,12 @@ function App() {
       } catch {
         // Presence is optional; the room itself still reports connection errors.
       } finally {
-        if (!cancelled) heartbeatTimer = window.setTimeout(() => void heartbeat(), streamLive ? 15_000 : 4_000)
+        beating = false
+        if (!cancelled) {
+          if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer)
+          heartbeatTimer = window.setTimeout(() => void heartbeat(), beatAgain ? 0 : streamLive ? 15_000 : 4_000)
+          beatAgain = false
+        }
       }
     }
     const beatNow = () => {
@@ -801,7 +811,7 @@ function App() {
     const list = people
       .slice()
       .sort((a, b) => (a.joinedAt?.getTime() ?? 0) - (b.joinedAt?.getTime() ?? 0))
-      .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))
+      .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity, muted: participant.metadata === 'muted' || participant.metadata === 'deafened', deafened: participant.metadata === 'deafened', sharing: Boolean(participant.getTrackPublication(Track.Source.ScreenShare)) }))
     setRoomParticipants(list)
   }
 
@@ -858,7 +868,13 @@ function App() {
       // Explicit subscription matters for screen shares from guests. It also
       // makes the behaviour independent from SDK defaults between releases.
       const room = new Room({ adaptiveStream: false, dynacast: true })
+      let recovering = false
+      const playRoomSound = (sound: Parameters<typeof playUiSound>[0]) => {
+        if (!recovering && roomRef.current === room) playUiSound(sound)
+      }
+      room.on(RoomEvent.SignalReconnecting, () => { recovering = true })
       room.on(RoomEvent.Reconnecting, () => {
+        recovering = true
         if (roomRef.current === room) {
           setIsReconnecting(true)
           setCallPing(null)
@@ -868,6 +884,8 @@ function App() {
         }
       })
       room.on(RoomEvent.Reconnected, () => {
+        // LiveKit flushes buffered events immediately after Reconnected.
+        queueMicrotask(() => { recovering = false })
         if (roomRef.current === room) {
           setIsReconnecting(false)
           reconnectAttemptsRef.current = 0
@@ -887,20 +905,28 @@ function App() {
         const name = participant.name || participant.identity
         setMessage(`${name} chegou na sala.`)
         syncRoomParticipants(room)
+        playRoomSound('user-join')
       })
-      room.on(RoomEvent.ParticipantDisconnected, () => syncRoomParticipants(room))
+      room.on(RoomEvent.ParticipantDisconnected, () => {
+        syncRoomParticipants(room)
+        playRoomSound('user-leave')
+      })
       room.on(RoomEvent.ParticipantNameChanged, () => syncRoomParticipants(room))
+      room.on(RoomEvent.ParticipantMetadataChanged, () => syncRoomParticipants(room))
       room.on(RoomEvent.ActiveSpeakersChanged, (activeSpeakers) => {
         setSpeakingIdentities(activeSpeakers.map((participant) => participant.identity))
       })
       room.on(RoomEvent.LocalTrackPublished, (publication) => {
         if (publication.source !== Track.Source.ScreenShare) return
+        playRoomSound('share-start')
         setIsSharing(true)
         setMessage('Sua tela está ao vivo.')
         recordSafeEvent('info', 'A transmissão de tela foi publicada.')
       })
       room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
         if (publication.source !== Track.Source.ScreenShare) return
+        // Ao sair da call a transmissão também acaba, mas aí basta o som de saída.
+        playRoomSound('share-stop')
         appAudioCaptureRef.current?.stop()
         appAudioCaptureRef.current = null
         const audio = localScreenAudioTrackRef.current
@@ -917,10 +943,18 @@ function App() {
         // Ask the SFU for the track immediately. Previously the UI only
         // learned about a stream after an implicit subscription completed.
         publication.setSubscribed(true)
+        syncRoomParticipants(room)
+        // Quem já transmitia antes de você entrar não toca som.
+        playRoomSound('share-start')
         setRemoteStream(true)
         setStreamPublisher(participant.name || participant.identity)
         setMessage(`${participant.name || participant.identity} começou uma transmissão. Carregando…`)
         recordSafeEvent('info', `Transmissão de ${participant.name || participant.identity} detectada; assinatura solicitada.`)
+      })
+      room.on(RoomEvent.TrackUnpublished, (publication) => {
+        if (publication.source !== Track.Source.ScreenShare) return
+        syncRoomParticipants(room)
+        playRoomSound('share-stop')
       })
       room.on(RoomEvent.TrackSubscriptionFailed, (_trackSid, participant) => {
         const name = participant.name || participant.identity
@@ -1007,6 +1041,7 @@ function App() {
       reconnectAttemptsRef.current = 0
       setMessage(isReconnect ? 'Conexão recuperada. Microfone desligado por segurança.' : microphoneEnabled ? 'Você entrou com o microfone ligado.' : voiceKeyMode === 'push-to-talk' ? 'Você entrou no modo apertar para falar.' : 'Você entrou. Ligue o microfone quando estiver pronto.')
       recordSafeEvent('info', isReconnect ? 'Reconexão com a call concluída.' : 'Entrada em uma call concluída.')
+      if (!isReconnect) playUiSound('self-join')
       return true
     } catch (error) {
       if (error instanceof Error && error.message.includes('ainda não está autorizado')) {
@@ -1116,7 +1151,9 @@ function App() {
     if (!room) return
     try {
       const actual = await microphoneController(room).setEnabled(!microphoneOn)
-      if (roomRef.current === room) setMicrophoneOn(actual)
+      if (roomRef.current !== room) return
+      if (actual !== microphoneOn) playUiSound(actual ? 'mic-unmute' : 'mic-mute')
+      setMicrophoneOn(actual)
     } catch { setMessage(`${systemText.The} bloqueou o acesso ao microfone.`, 'error') }
   }
 
@@ -1130,6 +1167,7 @@ function App() {
         setMicrophoneOn(false)
       }
       setDeafened(next)
+      playUiSound(next ? 'audio-mute' : 'audio-unmute')
       setMessage(next ? 'Você silenciou tudo. O microfone foi desligado.' : 'Você voltou a ouvir a call. Seu microfone continua desligado.')
     } catch { setMessage('Não foi possível alterar o modo silencioso.', 'error') }
   }
@@ -1557,6 +1595,7 @@ function App() {
     const room = roomRef.current
     roomRef.current = null
     void room?.disconnect()
+    if (room) playUiSound('self-leave')
     resetRoom('Você saiu da call.')
   }
 
@@ -2014,10 +2053,20 @@ function App() {
   const selfIdentity = getInstallationId()
   const selfName = participantName.trim() || 'Você'
   const liveRoom = connected && !isReconnecting && activeVoiceChannel ? activeVoiceChannel : null
+  // Mute and deafen come from the host (each client reports its own); screen
+  // sharing comes straight from the call when you're in it. Your own icons
+  // always follow local state, so they change the moment you click.
+  const voiceFlags = new Map(Object.values(channelPresence).flat().map((person) => [person.identity, person]))
+  const withVoiceFlags = (person: VoicePerson): VoicePerson => {
+    if (person.joining) return person
+    if (person.identity === selfIdentity) return { ...person, muted: selfMicMuted, deafened, sharing: isSharing }
+    const flags = voiceFlags.get(person.identity)
+    return { ...person, muted: person.muted ?? flags?.muted, deafened: person.deafened ?? flags?.deafened, sharing: person.sharing ?? flags?.sharing }
+  }
   const visibleChannelPresence: Record<string, VoicePerson[]> = Object.fromEntries(voiceChannels.map((channel) => {
-    if (channel.id === liveRoom && roomParticipants.length) return [channel.id, roomParticipants]
+    if (channel.id === liveRoom && roomParticipants.length) return [channel.id, roomParticipants.map(withVoiceFlags)]
     const people: VoicePerson[] = (channelPresence[channel.id] ?? []).filter((person) => person.identity !== selfIdentity)
-    if (channel.id === activeVoiceChannel && connected) return [channel.id, [...people, { identity: selfIdentity, name: selfName }]]
+    if (channel.id === activeVoiceChannel && connected) return [channel.id, [...people, { identity: selfIdentity, name: selfName }].map(withVoiceFlags)]
     if (channel.id === joiningVoiceChannel && !connected) return [channel.id, [...people, { identity: selfIdentity, name: selfName, joining: true }]]
     return [channel.id, people]
   }))

@@ -183,6 +183,10 @@ let presenceSnapshotJson = ''
 let presenceRefreshRunning = null
 let presenceRefreshQueued = false
 
+function isSharingScreen(participant) {
+  return Boolean(participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'))
+}
+
 async function readPresence() {
   const presence = await Promise.all(channels.voice.map(async (channel) => {
     const participants = await roomService.listParticipants(channel.id)
@@ -191,11 +195,21 @@ async function readPresence() {
   const channelsPresence = Object.fromEntries(presence.map(([channelId, participants]) => [channelId, participants
     .slice()
     .sort((a, b) => Number(a.joinedAt ?? 0) - Number(b.joinedAt ?? 0))
-    .map((participant) => ({ identity: participant.identity, name: participant.name || participant.identity }))]))
+    .map((participant) => {
+      const voice = participant.metadata
+      return {
+        identity: participant.identity,
+        name: participant.name || participant.identity,
+        // Só vai no JSON o que estiver ligado, para não pesar a presença.
+        ...((voice === 'muted' || voice === 'deafened') && { muted: true }),
+        ...(voice === 'deafened' && { deafened: true }),
+        ...(isSharingScreen(participant) && { sharing: true }),
+      }
+    })]))
   const callsByInstallation = new Map()
   presence.forEach(([channelId, participants]) => participants.forEach((participant) => callsByInstallation.set(participant.identity, {
     channelId,
-    streaming: participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'),
+    streaming: isSharingScreen(participant),
   })))
   const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, avatarRevision: profiles.avatarRevision(installationId), ...activeMemberStatus(installationId, callsByInstallation) }))
   return { channels: channelsPresence, members: memberList }
@@ -563,7 +577,7 @@ app.post('/token', async (request, response) => {
 
   rememberMemberHeartbeat(installationId)
   const token = new AccessToken(apiKey, apiSecret, { identity: installationId, name: participantName.trim(), ttl: '8h' })
-  token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true })
+  token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true })
   return response.json({ token: await token.toJwt() })
 })
 
