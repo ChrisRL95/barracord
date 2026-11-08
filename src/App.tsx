@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } from 'livekit-client'
@@ -11,10 +11,17 @@ import { isLinuxDesktop, systemText } from './platformText'
 import Soundboard from './Soundboard'
 import VoiceChannelMembers from './VoiceChannelMembers'
 import ControlIcon from './ControlIcon'
-import { playUiSound, preloadUiSounds, setUiSoundOutput } from './uiSounds'
+import { playUiSound, preloadUiSounds, setUiSoundOutput, setUiSoundVolume } from './uiSounds'
 import type { VoicePerson } from './VoiceChannelMembers'
 import MemberProfile, { ProfileAvatar } from './MemberProfile'
 import type { ProfileTarget } from './MemberProfile'
+import KeyboardShortcuts from './KeyboardShortcuts'
+import ChatLinkPreview from './ChatLinkPreview'
+import ChatMedia, { ChatMessageMedia } from './ChatMedia'
+import type { ChatMessage } from './ChatMedia'
+import StreamAnnotations from './StreamAnnotations'
+import { useStreamAnnotations } from './useStreamAnnotations'
+import { backgroundAccelerator, loadShortcuts, shortcutModifiers, shortcutsKey } from './shortcutPreferences'
 import UpdateButton from './UpdateButton'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
@@ -46,7 +53,6 @@ type HostStatus = { state: 'stopped' | 'starting' | 'running' | 'error'; message
 type ChannelPresence = Record<string, Array<{ identity: string; name: string; muted?: boolean; deafened?: boolean; sharing?: boolean }>>
 type Channel = { id: string; name: string; protected: boolean }
 type ChannelCatalog = { text: Channel[]; voice: Channel[] }
-type TextMessage = { id: string; author: string; installationId: string; body: string; createdAt: string }
 type PresenceMember = { installationId: string; name: string; status: 'online' | 'away' | 'em-call' | 'streaming' | 'offline'; channelId: string | null; avatarRevision?: string }
 type AdminMember = { installationId: string; name: string; authorizedAt: string; networkLinked?: boolean }
 type AdminInvite = { code: string; label: string; createdAt: string; expiresAt: string | null; usedAt: string | null; status: 'ativo' | 'usado' | 'revogado' | 'expirado'; activationReady?: boolean }
@@ -73,14 +79,22 @@ function avatarTone(value: string) {
   return `avatar-tone-${Math.abs(hash) % 6}`
 }
 
-function ChatMessageBody({ body }: { body: string }) {
+function ChatMessageBody({ body, endpoint, installationId }: { body: string; endpoint: string; installationId: string }) {
   const parts = body.split(/((?:https?:\/\/|www\.)[^\s<]+|(?<![@\w])(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<]*)?)/gi)
-  return <>{parts.map((part, index) => {
-    if (!/^(?:https?:\/\/|www\.|(?:[a-z0-9-]+\.)+[a-z]{2,63})/i.test(part)) return part
+  const links = parts.map((part, index) => {
+    if (index % 2 === 0) return null
     const [, address = part, ending = ''] = part.match(/^(.*?)([.,!?:;)\]]*)$/) ?? []
     const href = /^https?:\/\//i.test(address) ? address : `https://${address}`
-    return <span key={`${address}-${index}`}><a href={href} target="_blank" rel="noreferrer noopener">{address}</a>{ending}</span>
-  })}</>
+    return { address, ending, href }
+  })
+  const first = links.find((link) => link !== null)
+  return <>
+    <p>{parts.map((part, index) => {
+      const link = links[index]
+      return link ? <span key={index}><a href={link.href} target="_blank" rel="noreferrer noopener">{link.address}</a>{link.ending}</span> : part
+    })}</p>
+    {first && <ChatLinkPreview key={first.href} href={first.href} endpoint={endpoint} installationId={installationId} />}
+  </>
 }
 
 function inviteInsideActivation(value: string) {
@@ -129,10 +143,10 @@ function App() {
   const remoteAudioRef = useRef<HTMLDivElement | null>(null)
   const remoteVolumeRef = useRef(100)
   const streamVolumeRef = useRef(100)
+  const attentionAudioRef = useRef<HTMLAudioElement | null>(null)
   const streamStartPreferenceRef = useRef<'notice' | 'open' | 'none'>('notice')
   const participantAudioRef = useRef<Record<string, { volume: number; muted: boolean }>>({})
   const microphoneOnRef = useRef(false)
-  const shortcutRestoreMicrophoneRef = useRef(false)
   const deafenedRef = useRef(false)
   const microphoneTestStreamRef = useRef<MediaStream | null>(null)
   const microphoneTestContextRef = useRef<AudioContext | null>(null)
@@ -195,20 +209,19 @@ function App() {
   const [roomParticipants, setRoomParticipants] = useState<VoicePerson[]>([])
   const [joiningVoiceChannel, setJoiningVoiceChannel] = useState<string | null>(null)
   const [profileTarget, setProfileTarget] = useState<ProfileTarget | null>(null)
-  const [textMessages, setTextMessages] = useState<TextMessage[]>([])
+  const [textMessages, setTextMessages] = useState<ChatMessage[]>([])
+  const textMessageListRef = useRef<HTMLDivElement>(null)
+  const followChatRef = useRef(true)
   const [textDraft, setTextDraft] = useState('')
   const [copiedChatMessageId, setCopiedChatMessageId] = useState('')
   const [connected, setConnected] = useState(false)
   const [callPing, setCallPing] = useState<number | null>(null)
   const [isSharing, setIsSharing] = useState(false)
   const [showLocalPreview, setShowLocalPreview] = useState(() => localStorage.getItem('barracord.showLocalPreview') !== 'false')
+  const [annotationSource, setAnnotationSource] = useState<{ identity: string; sid: string } | null>(null)
   const [microphoneOn, setMicrophoneOn] = useState(false)
-  const [voiceKeyMode, setVoiceKeyMode] = useState<'off' | 'push-to-talk' | 'push-to-mute'>(() => {
-    const saved = localStorage.getItem('barracord.voiceKeyMode')
-    return saved === 'push-to-talk' || saved === 'push-to-mute' ? saved : 'off'
-  })
-  const [voiceShortcut, setVoiceShortcut] = useState(() => localStorage.getItem('barracord.voiceShortcut') ?? 'Space')
-  const [voiceShortcutPressed, setVoiceShortcutPressed] = useState(false)
+  const [shortcuts, setShortcuts] = useState(loadShortcuts)
+  const [rejectedShortcuts, setRejectedShortcuts] = useState<string[]>([])
   const [deafened, setDeafened] = useState(false)
   const [microphoneTestActive, setMicrophoneTestActive] = useState(false)
   const [microphoneTestLevel, setMicrophoneTestLevel] = useState(0)
@@ -239,9 +252,11 @@ function App() {
   const [speakingIdentities, setSpeakingIdentities] = useState<string[]>([])
   const [soundboardIdentity, setSoundboardIdentity] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'audio' | 'stream' | 'barraca'>('audio')
+  const [settingsTab, setSettingsTab] = useState<'audio' | 'stream' | 'shortcuts' | 'barraca'>('audio')
   const [memberMenu, setMemberMenu] = useState<{ id: string; x: number; y: number } | null>(null)
-  const [attentionNotice, setAttentionNotice] = useState<{ text: string; error?: boolean } | null>(null)
+  const [chatMenu, setChatMenu] = useState<{ id: string; channel: string; x: number; y: number } | null>(null)
+  const chatRevision = useRef(0)
+  const [attentionNotice, setAttentionNotice] = useState<{ text: string; error?: boolean; sender?: { id?: string; name: string } } | null>(null)
   const [streamFullscreen, setStreamFullscreen] = useState(false)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [microphoneDevice, setMicrophoneDevice] = useState(() => localStorage.getItem('barracord.microphoneDevice') ?? 'default')
@@ -249,6 +264,8 @@ function App() {
   const [speakerDevice, setSpeakerDevice] = useState(() => localStorage.getItem('barracord.speakerDevice') ?? 'default')
   const [remoteVolume, setRemoteVolume] = useState(() => getStoredNumber('barracord.remoteVolume', 100))
   const [streamVolume, setStreamVolume] = useState(() => getStoredNumber('barracord.streamVolume', 100))
+  const [soundboardVolume, setSoundboardVolume] = useState(() => getStoredNumber('barracord.soundboardVolume', 100))
+  const [notificationVolume, setNotificationVolume] = useState(() => getStoredNumber('barracord.notificationVolume', 100))
   const [streamStartPreference, setStreamStartPreference] = useState<'notice' | 'open' | 'none'>(() => {
     const saved = localStorage.getItem('barracord.streamStartPreference')
     return saved === 'open' || saved === 'none' ? saved : 'notice'
@@ -273,9 +290,7 @@ function App() {
   const [sharingQuality, setSharingQuality] = useState('')
   const nextShareQuality = { resolution: qualityProfile === 'smooth' || qualityProfile === 'gaming' ? 720 as const : 1080 as const, fps: qualityProfile === 'smooth' || qualityProfile === 'auto' ? 30 as const : 60 as const }
 
-  // O que os outros veem ao lado do seu nome no canal. Apertar para falar não
-  // conta como mutado: ali o microfone só fica desligado entre uma fala e outra.
-  const selfMicMuted = connected && (deafened || (voiceKeyMode !== 'push-to-talk' && !microphoneOn))
+  const selfMicMuted = connected && (deafened || !microphoneOn)
   useEffect(() => {
     const room = roomRef.current
     if (!connected || isReconnecting || !room) return
@@ -322,11 +337,16 @@ function App() {
   useEffect(() => { localStorage.setItem('barracord.speakerDevice', speakerDevice) }, [speakerDevice])
   useEffect(() => { localStorage.setItem('barracord.remoteVolume', String(remoteVolume)) }, [remoteVolume])
   useEffect(() => { localStorage.setItem('barracord.streamVolume', String(streamVolume)) }, [streamVolume])
+  useEffect(() => { localStorage.setItem('barracord.soundboardVolume', String(soundboardVolume)) }, [soundboardVolume])
+  useEffect(() => {
+    localStorage.setItem('barracord.notificationVolume', String(notificationVolume))
+    setUiSoundVolume(notificationVolume / 100)
+    if (attentionAudioRef.current) attentionAudioRef.current.volume = notificationVolume / 100
+  }, [notificationVolume])
   useEffect(() => { streamStartPreferenceRef.current = streamStartPreference; localStorage.setItem('barracord.streamStartPreference', streamStartPreference) }, [streamStartPreference])
   useEffect(() => { localStorage.setItem('barracord.qualityProfile', qualityProfile) }, [qualityProfile])
   useEffect(() => { localStorage.setItem('barracord.hostUploadLimit', String(hostUploadLimit)) }, [hostUploadLimit])
-  useEffect(() => { localStorage.setItem('barracord.voiceKeyMode', voiceKeyMode) }, [voiceKeyMode])
-  useEffect(() => { localStorage.setItem('barracord.voiceShortcut', voiceShortcut) }, [voiceShortcut])
+  useEffect(() => { localStorage.setItem(shortcutsKey, JSON.stringify(shortcuts)) }, [shortcuts])
   useEffect(() => { localStorage.setItem('barracord.keepBarracaAvailable', String(keepBarracaAvailable)) }, [keepBarracaAvailable])
   useEffect(() => { microphoneOnRef.current = microphoneOn }, [microphoneOn])
   useEffect(() => { noiseModeRef.current = noiseMode; localStorage.setItem('barracord.noiseSuppression', noiseMode) }, [noiseMode])
@@ -336,37 +356,53 @@ function App() {
     if (microphoneTestPlaybackRef.current) microphoneTestPlaybackRef.current.muted = !listenToMicrophoneTest
   }, [listenToMicrophoneTest])
 
+  const runToggleShortcut = useEffectEvent((action: 'toggle-mic' | 'toggle-deafen') => {
+    if (action === 'toggle-deafen') void toggleDeafen()
+    else if (!deafenedRef.current) void toggleMicrophone()
+  })
+
+  const onBackgroundShortcut = useEffectEvent((id: string) => {
+    if (!connected || settingsOpen) return
+    const binding = shortcuts.find((item) => item.id === id && item.enabled)
+    if (binding) runToggleShortcut(binding.action)
+  })
+
   useEffect(() => {
-    if (!connected || voiceKeyMode === 'off') return
-    const isEditableTarget = (target: EventTarget | null) => target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable)
-    const changeMicrophone = async (enabled: boolean) => {
-      const room = roomRef.current
-      if (!room) return
-      try { const actual = await microphoneController(room).setEnabled(enabled); if (roomRef.current === room) setMicrophoneOn(actual) }
-      catch { setMessage('Não foi possível alterar o microfone pelo atalho.', 'error') }
+    const desktop = window.chriscordDesktop
+    if (!desktop?.registerCallShortcuts || !connected || settingsOpen) return
+    const bindings = shortcuts.flatMap((item) => {
+      const accelerator = item.enabled && backgroundAccelerator(item, desktop.platform)
+      return accelerator ? [{ id: item.id, accelerator }] : []
+    })
+    if (!bindings.length) return
+    let cancelled = false
+    const unsubscribe = desktop.onCallShortcut((id) => onBackgroundShortcut(id))
+    const unsubscribeRejected = desktop.onCallShortcutRejected((ids) => setRejectedShortcuts(ids))
+    void desktop.registerCallShortcuts(bindings).catch(() => {
+      if (!cancelled) setRejectedShortcuts(bindings.map((item) => item.id))
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+      unsubscribeRejected()
+      void desktop.registerCallShortcuts([]).catch(() => {})
     }
+  }, [shortcuts, connected, settingsOpen])
+
+  useEffect(() => {
+    if (!connected || settingsOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== voiceShortcut || event.repeat || isEditableTarget(event.target)) return
+      if (event.defaultPrevented || event.repeat || event.isComposing || event.getModifierState('AltGraph')) return
+      if (event.target instanceof HTMLElement && (event.target.isContentEditable || event.target.closest('input, textarea, select, dialog[open], [role="dialog"]'))) return
+      const modifiers = shortcutModifiers(event)
+      const binding = shortcuts.find((item) => item.enabled && item.combo?.code === event.code && item.combo.modifiers === modifiers)
+      if (!binding) return
       event.preventDefault()
-      setVoiceShortcutPressed(true)
-      if (voiceKeyMode === 'push-to-talk') void changeMicrophone(true)
-      if (voiceKeyMode === 'push-to-mute') {
-        shortcutRestoreMicrophoneRef.current = microphoneOnRef.current
-        if (microphoneOnRef.current) void changeMicrophone(false)
-      }
-    }
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.code !== voiceShortcut) return
-      event.preventDefault()
-      setVoiceShortcutPressed(false)
-      if (voiceKeyMode === 'push-to-talk') void changeMicrophone(false)
-      if (voiceKeyMode === 'push-to-mute' && shortcutRestoreMicrophoneRef.current) void changeMicrophone(true)
-      shortcutRestoreMicrophoneRef.current = false
+      runToggleShortcut(binding.action)
     }
     window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('keyup', onKeyUp)
-    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
-  }, [connected, voiceKeyMode, voiceShortcut])
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [connected, shortcuts, settingsOpen])
 
   useEffect(() => {
     remoteVolumeRef.current = remoteVolume
@@ -394,7 +430,7 @@ function App() {
 
   useEffect(() => {
     const container = remoteVideoRef.current
-    if (!container || !isSharing || !showLocalPreview) {
+    if (!container || !isSharing || !showLocalPreview || watchingStream) {
       localPreviewElementRef.current?.remove()
       localPreviewElementRef.current = null
       return
@@ -424,7 +460,7 @@ function App() {
       localPreviewElementRef.current?.remove()
       localPreviewElementRef.current = null
     }
-  }, [isSharing, showLocalPreview])
+  }, [isSharing, showLocalPreview, stageView, watchingStream])
 
   useEffect(() => {
     if (!watchingStream || !remoteStream) return
@@ -587,6 +623,8 @@ function App() {
     const presenceEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence')
     const installationId = getInstallationId()
     const attentionAudio = new Audio(attentionSound)
+    attentionAudio.volume = getStoredNumber('barracord.notificationVolume', 100) / 100
+    attentionAudioRef.current = attentionAudio
 
     // The heartbeat keeps this computer "online". While the live stream is up
     // it only needs to beat every 15 s; without it (older host, network hiccup)
@@ -628,10 +666,13 @@ function App() {
       if (cancelled || typeof EventSource === 'undefined') return
       stream = new EventSource(`${presenceEndpoint}/stream?${new URLSearchParams({ installationId, attention: '1' }).toString()}`)
       stream.addEventListener('attention', (event) => {
-        let name: unknown
-        try { name = JSON.parse((event as MessageEvent<string>).data)?.name } catch { return }
-        if (cancelled || typeof name !== 'string') return
-        setAttentionNotice({ text: `${name} chamou sua atenção.` })
+        let sender: { name?: unknown; senderId?: unknown } | null
+        try { sender = JSON.parse((event as MessageEvent<string>).data) } catch { return }
+        if (cancelled || typeof sender?.name !== 'string') return
+        setAttentionNotice({
+          text: `${sender.name} chamou sua atenção.`,
+          sender: { name: sender.name, id: typeof sender.senderId === 'string' ? sender.senderId : undefined },
+        })
         const output = attentionAudio as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
         const speaker = localStorage.getItem('barracord.speakerDevice') ?? 'default'
         void (async () => {
@@ -666,16 +707,17 @@ function App() {
       cancelled = true
       stream?.close()
       attentionAudio.pause()
+      attentionAudioRef.current = null
       if (streamRetry !== null) window.clearTimeout(streamRetry)
       if (heartbeatTimer !== null) window.clearTimeout(heartbeatTimer)
     }
   }, [authorizedInstallation, tokenEndpoint])
 
   useEffect(() => {
-    if (!memberMenu) return
-    const close = () => setMemberMenu(null)
+    if (!memberMenu && !chatMenu) return
+    const close = () => { setMemberMenu(null); setChatMenu(null) }
     const dismiss = (event: PointerEvent) => {
-      if (event.target instanceof Element && !event.target.closest('.member-context-menu')) close()
+      if (event.target instanceof Element && !event.target.closest('.member-context-menu, .chat-context-menu')) close()
     }
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
     document.addEventListener('pointerdown', dismiss)
@@ -686,7 +728,7 @@ function App() {
       document.removeEventListener('keydown', escape)
       window.removeEventListener('resize', close)
     }
-  }, [memberMenu])
+  }, [memberMenu, chatMenu])
 
   useEffect(() => {
     if (!authorizedInstallation) return
@@ -699,14 +741,15 @@ function App() {
     if (!authorizedInstallation) return
     let cancelled = false
     const loadMessages = async () => {
+      const revision = chatRevision.current
       try {
         const messagesEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/messages')
         const params = new URLSearchParams({ channel: selectedTextChannel, installationId: getInstallationId() })
         const response = await fetch(`${messagesEndpoint}?${params.toString()}`, { cache: 'no-store' })
         if (response.status === 401) { if (!cancelled) returnToActivation(); return }
         if (!response.ok || cancelled) return
-        const body = await response.json() as { messages?: TextMessage[] }
-        if (!cancelled && body.messages) setTextMessages(body.messages)
+        const body = await response.json() as { messages?: ChatMessage[] }
+        if (!cancelled && revision === chatRevision.current && body.messages) setTextMessages(body.messages)
       } catch {
         // The text channel will refresh when the Barraca is available again.
       }
@@ -816,6 +859,7 @@ function App() {
   }
 
   function resetRoom(messageText: string) {
+    setAnnotationSource(null)
     microphoneControllerRef.current?.dispose()
     setRoomParticipants([])
     microphoneControllerRef.current = null
@@ -963,6 +1007,7 @@ function App() {
       })
       room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
         if (track.kind === Track.Kind.Video) {
+          setAnnotationSource(publication.source === Track.Source.ScreenShare ? { identity: participant.identity, sid: publication.trackSid } : null)
           const video = track.attach()
           video.autoplay = true
           if (video instanceof HTMLVideoElement) video.playsInline = true
@@ -1022,7 +1067,7 @@ function App() {
         room.switchActiveDevice('audiooutput', speakerDevice).catch(() => undefined),
       ])
       let microphoneEnabled = false
-      if (!isReconnect && voiceKeyMode !== 'push-to-talk') {
+      if (!isReconnect) {
         try {
           microphoneEnabled = await microphoneController(room).setEnabled(true)
         } catch { setMessage(`Você entrou, mas ${systemText.the} bloqueou o microfone.`, 'warning') }
@@ -1039,7 +1084,7 @@ function App() {
       setIsReconnecting(false)
       setConnectionUnavailable(false)
       reconnectAttemptsRef.current = 0
-      setMessage(isReconnect ? 'Conexão recuperada. Microfone desligado por segurança.' : microphoneEnabled ? 'Você entrou com o microfone ligado.' : voiceKeyMode === 'push-to-talk' ? 'Você entrou no modo apertar para falar.' : 'Você entrou. Ligue o microfone quando estiver pronto.')
+      setMessage(isReconnect ? 'Conexão recuperada. Microfone desligado por segurança.' : microphoneEnabled ? 'Você entrou com o microfone ligado.' : 'Você entrou. Ligue o microfone quando estiver pronto.')
       recordSafeEvent('info', isReconnect ? 'Reconexão com a call concluída.' : 'Entrada em uma call concluída.')
       if (!isReconnect) playUiSound('self-join')
       return true
@@ -1170,16 +1215,6 @@ function App() {
       playUiSound(next ? 'audio-mute' : 'audio-unmute')
       setMessage(next ? 'Você silenciou tudo. O microfone foi desligado.' : 'Você voltou a ouvir a call. Seu microfone continua desligado.')
     } catch { setMessage('Não foi possível alterar o modo silencioso.', 'error') }
-  }
-
-  async function changeVoiceKeyMode(mode: 'off' | 'push-to-talk' | 'push-to-mute') {
-    setVoiceKeyMode(mode)
-    if (mode !== 'push-to-talk' || !microphoneOnRef.current || !roomRef.current) return
-    try {
-      await microphoneController(roomRef.current).setEnabled(false)
-      setMicrophoneOn(false)
-      setMessage('Aperte a tecla configurada para falar.')
-    } catch { setMessage('Não foi possível preparar o modo apertar para falar.') }
   }
 
   function changeParticipantAudio(identity: string, patch: Partial<{ volume: number; muted: boolean }>) {
@@ -1663,7 +1698,7 @@ function App() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ channel: selectedTextChannel, body, installationId: getInstallationId() }),
       })
-      const result = await response.json() as { message?: TextMessage; error?: string }
+      const result = await response.json() as { message?: ChatMessage; error?: string }
       if (response.status === 401) { returnToActivation(); return }
       if (!response.ok || !result.message) throw new Error(result.error ?? 'Não foi possível enviar a mensagem.')
       setTextMessages((messages) => [...messages, result.message!])
@@ -1671,7 +1706,7 @@ function App() {
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.', 'error') }
   }
 
-  async function copyChatMessage(chat: TextMessage) {
+  async function copyChatMessage(chat: ChatMessage) {
     try {
       const copied = window.chriscordDesktop
         ? await window.chriscordDesktop.writeClipboard(chat.body)
@@ -1680,6 +1715,24 @@ function App() {
       setCopiedChatMessageId(chat.id)
       window.setTimeout(() => setCopiedChatMessageId((current) => current === chat.id ? '' : current), 1_800)
     } catch { setMessage('Não foi possível copiar esta mensagem.') }
+  }
+
+  async function deleteChatMessage(id: string, channel: string, hostCode?: string) {
+    setChatMenu(null)
+    try {
+      const response = await fetch(`${adminEndpoint('/messages')}/${encodeURIComponent(id)}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel, installationId: getInstallationId(), hostCode }),
+      })
+      if (!response.ok) {
+        const result = await response.json().catch(() => null)
+        throw new Error(result?.error ?? 'Não foi possível excluir a mensagem.')
+      }
+      chatRevision.current++
+      setTextMessages((items) => items.filter((item) => item.id !== id))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Não foi possível excluir a mensagem.', 'error')
+    }
   }
 
   function adminEndpoint(pathname: string) { return tokenEndpoint.trim().replace(/\/token\/?$/, pathname) }
@@ -2004,16 +2057,31 @@ function App() {
         <nav className="settings-tabs" aria-label="Categorias de configurações">
           <button type="button" className={settingsTab === 'audio' ? 'active' : ''} onClick={() => setSettingsTab('audio')}>Áudio</button>
           <button type="button" className={settingsTab === 'stream' ? 'active' : ''} onClick={() => setSettingsTab('stream')}>Transmissão</button>
+          <button type="button" className={settingsTab === 'shortcuts' ? 'active' : ''} onClick={() => setSettingsTab('shortcuts')}>Atalhos</button>
           {isHostApp && <button type="button" className={settingsTab === 'barraca' ? 'active' : ''} onClick={() => setSettingsTab('barraca')}>Barraca</button>}
         </nav>
         <div className="settings-tab-content">
           {settingsTab === 'audio' && <>
-            <section className="settings-section"><div className="settings-title"><strong>Dispositivos</strong><button type="button" onClick={() => void refreshDevices()}>Atualizar lista</button></div><label>Microfone<select value={microphoneDevice} onChange={(event) => void changeDevice('audioinput', event.target.value)} disabled={noiseChanging || microphoneTestStarting}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microfone ${index + 1}`}</option>)}</select></label><label>Saída de áudio<select value={speakerDevice} onChange={(event) => void changeDevice('audiooutput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audiooutput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Saída ${index + 1}`}</option>)}</select></label><label className="volume-setting">Volume da galera <strong>{remoteVolume}%</strong><input type="range" min="0" max="100" value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} /></label></section>
+            <section className="settings-section"><div className="settings-title"><strong>Dispositivos</strong><button type="button" onClick={() => void refreshDevices()}>Atualizar lista</button></div><label>Microfone<select value={microphoneDevice} onChange={(event) => void changeDevice('audioinput', event.target.value)} disabled={noiseChanging || microphoneTestStarting}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microfone ${index + 1}`}</option>)}</select></label><label>Saída de áudio<select value={speakerDevice} onChange={(event) => void changeDevice('audiooutput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audiooutput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Saída ${index + 1}`}</option>)}</select></label></section>
+            <section className="settings-section">
+              <strong>Volumes de reprodução</strong>
+              {([
+                ['Vozes da call', remoteVolume, setRemoteVolume],
+                ['Transmissões', streamVolume, setStreamVolume],
+                ['Soundboard', soundboardVolume, setSoundboardVolume],
+                ['Avisos do app', notificationVolume, setNotificationVolume],
+              ] as const).map(([label, volume, setVolume]) => (
+                <label className="volume-setting" key={label}>
+                  {label} <strong>{volume}%</strong>
+                  <input type="range" min="0" max="100" value={volume} aria-label={label} onChange={(event) => setVolume(Number(event.target.value))} />
+                </label>
+              ))}
+            </section>
             <section className="settings-section noise-suppression-settings"><strong>Supressão de ruído do microfone</strong><label>Modo<select value={noiseMode} onChange={(event) => void changeNoiseMode(event.target.value as NoiseMode)} disabled={noiseChanging || microphoneTestStarting}><option value="off">Desligado</option><option value="basic">Básico · WebRTC</option><option value="rnnoise">RNNoise · avançado local</option></select></label><p>{noiseMode === 'rnnoise' ? 'Reduz ruídos no seu computador, sem enviar áudio a um serviço externo.' : noiseMode === 'basic' ? 'Usa a redução de ruído padrão do navegador/Electron.' : 'Sem supressão de ruído. O cancelamento de eco continua ativo.'} O áudio dos jogos e das transmissões não passa por este filtro.</p><p className="noise-mode-status" role="status">{noiseChanging || microphoneTestStarting ? 'Preparando áudio…' : connected && microphoneOn ? `Microfone usando ${noiseModeLabels[noiseMode]}.` : microphoneTestActive ? `Teste usando ${noiseModeLabels[noiseMode]}.` : `Preferência salva: ${noiseModeLabels[noiseMode]}. Será aplicada ao ligar o microfone.`}</p>{noiseMessage && <p className="noise-mode-warning" role="status">{noiseMessage}</p>}
               <div className="microphone-test"><div><small>TESTE DE MICROFONE</small><strong>{connected ? 'Saia da call para comparar o som do microfone.' : microphoneTestActive ? 'Fale normalmente e compare os modos.' : 'Teste antes de entrar em uma call.'}</strong></div><div className="microphone-level" aria-label="Nível do microfone após o filtro"><i style={{ width: `${microphoneTestLevel}%` }} /></div><label className="microphone-listen-option"><input type="checkbox" checked={listenToMicrophoneTest} onChange={(event) => setListenToMicrophoneTest(event.target.checked)} disabled={connected} />Ouvir minha voz no teste (use fones)</label><button type="button" onClick={() => void toggleMicrophoneTest()} disabled={connected || microphoneTestStarting || noiseChanging}>{microphoneTestStarting ? 'Preparando…' : microphoneTestActive ? 'Parar teste' : 'Testar microfone'}</button></div>
             </section>
-            <section className="settings-section voice-shortcut-settings"><strong>Atalho de voz</strong><p>Funciona com o Barracord em foco. A tecla nunca é capturada enquanto você está digitando no chat.</p><label>Modo<select value={voiceKeyMode} onChange={(event) => void changeVoiceKeyMode(event.target.value as 'off' | 'push-to-talk' | 'push-to-mute')}><option value="off">Desligado</option><option value="push-to-talk">Apertar para falar</option><option value="push-to-mute">Apertar para mutar</option></select></label><label>Tecla<select value={voiceShortcut} onChange={(event) => setVoiceShortcut(event.target.value)} disabled={voiceKeyMode === 'off'}><option value="Space">Espaço</option><option value="KeyV">V</option><option value="KeyC">C</option><option value="CapsLock">Caps Lock</option></select></label>{voiceKeyMode !== 'off' && <div className="voice-shortcut-preview"><kbd>{voiceShortcutLabel}</kbd><span>{voiceKeyMode === 'push-to-talk' ? 'Segure para falar' : 'Segure para mutar'}</span></div>}</section>
           </>}
+          {settingsTab === 'shortcuts' && <KeyboardShortcuts shortcuts={shortcuts} onChange={setShortcuts} backgroundAvailable={Boolean(window.chriscordDesktop?.registerCallShortcuts)} rejected={rejectedShortcuts} />}
           {settingsTab === 'stream' && <section className="settings-section settings-streaming"><strong>Qualidade da próxima transmissão</strong><p>O perfil define os limites de captura e envio; a resolução e a fluidez podem variar conforme a janela e a conexão. Alterações valem para a próxima transmissão.</p><div className="quality-options">{qualityPresets.map((preset) => <button key={preset.id} className={qualityProfile === preset.id ? 'selected' : ''} type="button" onClick={() => setQualityProfile(preset.id)}><b>{preset.label}</b><span>{preset.detail}</span></button>)}</div><div className="settings-help-card"><strong>Som da transmissão</strong><p>{isLinuxDesktop ? 'No Linux, escolha ao compartilhar os aplicativos que estão tocando som, ou todo o som do computador. A call do Barracord nunca entra na transmissão.' : window.chriscordDesktop ? 'No Windows, marque os aplicativos de áudio ao compartilhar. A captura isolada é experimental. Sistema inteiro inclui todos os sons, inclusive outras calls.' : 'A captura isolada por aplicativo está disponível no cliente Windows. No navegador, as opções de áudio dependem do seletor de compartilhamento.'} O microfone é controlado separadamente.</p></div></section>}
           {settingsTab === 'stream' && <section className="settings-section"><strong>Ao assistir</strong><label>Quando alguém iniciar uma transmissão<select value={streamStartPreference} onChange={(event) => setStreamStartPreference(event.target.value as 'notice' | 'open' | 'none')}><option value="notice">Mostrar aviso para eu escolher assistir</option><option value="open">Abrir automaticamente</option><option value="none">Não abrir nem avisar automaticamente</option></select></label><p>Esta preferência controla a recepção das transmissões dos outros e é salva neste computador.</p></section>}
           {settingsTab === 'barraca' && isHostApp && <section className="settings-section host-availability-setting"><strong>Barraca neste computador</strong><p>Quando o Barracord Anfitrião abrir, deixe a Barraca pronta para a galera. Fechar o app ainda encerra a Barraca.</p><label><input type="checkbox" checked={keepBarracaAvailable} onChange={(event) => setKeepBarracaAvailable(event.target.checked)} /> Manter a Barraca disponível ao abrir</label></section>}
@@ -2098,7 +2166,23 @@ function App() {
   const uploadLoad = estimatedUploadMbps / hostUploadLimit
   const uploadAlert = estimatedUploadMbps === 0 ? 'normal' : uploadLoad >= .9 ? 'critical' : uploadLoad >= .7 ? 'warning' : 'normal'
   const showingVoiceStage = connected && stageView === 'voice'
-  const voiceShortcutLabel = voiceShortcut === 'Space' ? 'Espaço' : voiceShortcut === 'CapsLock' ? 'Caps Lock' : voiceShortcut === 'KeyV' ? 'V' : voiceShortcut === 'KeyC' ? 'C' : voiceShortcut
+  const chatAdminCode = adminCode.trim() && (isHostApp || adminData) ? adminCode : undefined
+  const selectedChatMessage = chatMenu?.channel === selectedTextChannel ? textMessages.find((item) => item.id === chatMenu.id) : undefined
+  const whatsappMessage = connected && voiceChannelName
+    ? `Tô na call ${voiceChannelName} do Barracord. Bora entrar?`
+    : 'Bora entrar no Barracord?'
+  const whatsappInviteUrl = `https://wa.me/?text=${encodeURIComponent(whatsappMessage)}`
+  const annotationRoom = connected ? roomRef.current : null
+  const localAnnotationSid = isSharing ? annotationRoom?.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.trackSid : undefined
+  const annotations = useStreamAnnotations(annotationRoom, localAnnotationSid, watchingStream && remoteStream ? annotationSource : null)
+  useLayoutEffect(() => {
+    followChatRef.current = true
+  }, [selectedTextChannel, showingVoiceStage])
+
+  useLayoutEffect(() => {
+    const list = textMessageListRef.current
+    if (list && followChatRef.current) list.scrollTop = list.scrollHeight
+  }, [selectedTextChannel, showingVoiceStage, textMessages])
   const barracaUnavailable = authorizedInstallation && barracaAccess === 'unavailable'
   const barracaChecking = authorizedInstallation && barracaAccess === 'checking'
   const connectionLabel = isReconnecting ? 'Reconectando…' : barracaChecking ? 'Conferindo acesso…' : barracaUnavailable ? 'Barraca indisponível' : connectionUnavailable ? 'Sem conexão' : connected ? `Em ${voiceChannelName}` : authorizedInstallation ? 'Na Barraca' : networkText
@@ -2120,13 +2204,16 @@ function App() {
 
     {window.chriscordDesktop && isHostApp && hostStatus.state !== 'running' && <section className={`host-availability-notice ${hostStatus.state}`} role="status"><div><small>{isDevelopment ? 'TESTE LOCAL' : 'ANFITRIÃO'}</small><strong>{hostStateLabel}</strong><span>{hostStatus.state === 'starting' ? hostIsRecovering ? 'A Barraca caiu, mas está tentando voltar sozinha. Aguarde alguns segundos.' : 'Preparando voz, chat e transmissão para a galera.' : hostStatus.state === 'error' ? hostStateDetail : 'Abra a Barraca neste PC para deixar a galera entrar.'}</span></div>{hostStatus.state !== 'starting' && <button type="button" onClick={() => void toggleHost()}>{hostActionLabel} →</button>}</section>}
     {attentionNotice && <aside className={`host-recovery-toast attention-toast ${attentionNotice.error ? 'error' : ''}`} role="status">
-      <i aria-hidden="true">!</i><div><small>CHAMAR ATENÇÃO</small><strong>{attentionNotice.text}</strong></div>
+      {attentionNotice.sender?.id
+        ? memberAvatar(attentionNotice.sender.id, attentionNotice.sender.name, 'member-avatar attention-avatar')
+        : <i aria-hidden="true">{attentionNotice.sender?.name.slice(0, 1).toUpperCase() || '!'}</i>}
+      <div><small>CHAMAR ATENÇÃO</small><strong>{attentionNotice.text}</strong></div>
       <button type="button" onClick={() => setAttentionNotice(null)} aria-label="Fechar aviso">?</button>
     </aside>}
     {hostRecoveryNotice && <aside className={`host-recovery-toast ${hostRecoveryNotice.kind}`} role="status"><i>{hostRecoveryNotice.kind === 'success' ? '✓' : '!'}</i><div><small>{hostRecoveryNotice.kind === 'success' ? 'RECUPERAÇÃO CONCLUÍDA' : 'AÇÃO NECESSÁRIA'}</small><strong>{hostRecoveryNotice.text}</strong></div><button type="button" onClick={() => setHostRecoveryNotice(null)} aria-label="Fechar aviso">×</button></aside>}
     {barracaUnavailable && <section className="barraca-unavailable-notice" role="status"><div><small>CONEXÃO COM A BARRACA</small><strong>A Barraca não respondeu.</strong><span>Ela pode estar fechada, ou a Rede da Barraca ainda pode estar iniciando neste computador.</span></div><button type="button" onClick={() => void verifyBarracaAccess()}>Tentar novamente</button></section>}
 
-    <section className="room-layout">
+    <section className={`room-layout${showingVoiceStage ? '' : ' chat-layout'}`}>
       <aside className="room-nav">
         <div className="room-nav-title"><span className="room-nav-mark">B</span><strong>Barraca</strong><button type="button" onClick={openSettings} title="Configurações da Barraca" aria-label="Configurações da Barraca">⚙</button></div>
         <div className="channel-navigation">
@@ -2152,7 +2239,7 @@ function App() {
                 <button className={`round-control ${microphoneOn ? 'enabled' : ''}`} type="button" onClick={toggleMicrophone} disabled={!connected} title={microphoneOn ? 'Microfone ligado' : 'Microfone desligado'} aria-label={microphoneOn ? 'Desligar microfone' : 'Ligar microfone'}><ControlIcon name={microphoneOn ? 'microphone' : 'microphoneOff'} /></button>
                 <button className={`round-control deafen-control ${deafened ? 'deafened' : ''}`} type="button" onClick={() => void toggleDeafen()} disabled={!connected} title={deafened ? 'Voltar a ouvir' : 'Silenciar tudo'} aria-label={deafened ? 'Voltar a ouvir a call' : 'Silenciar tudo'} aria-pressed={deafened}><ControlIcon name={deafened ? 'deafen' : 'headphones'} /></button>
               </>}
-              <Soundboard endpoint={tokenEndpoint} installationId={getInstallationId()} room={connected && !isReconnecting ? roomRef.current : null} deafened={deafened} speaker={speakerDevice} compact={connected} onPlayingChange={setSoundboardIdentity} />
+              <Soundboard endpoint={tokenEndpoint} installationId={getInstallationId()} room={connected && !isReconnecting ? roomRef.current : null} deafened={deafened} speaker={speakerDevice} compact={connected} volume={soundboardVolume} onPlayingChange={setSoundboardIdentity} />
               {connected && <button className="leave-button" type="button" onClick={disconnect} title="Sair da call" aria-label="Sair da call"><ControlIcon name="leave" /></button>}
             </div>
             {connected && <button className={`screen-control ${isSharing ? 'broadcasting' : ''}`} type="button" onClick={toggleScreenShare} title={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'} aria-label={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}><ControlIcon name="screen" /><span>{isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}</span></button>}
@@ -2166,6 +2253,8 @@ function App() {
           <div className="stage-head"><div><p>◉ {voiceChannelName}</p><span>{watchingStream ? `Assistindo ${streamPublisher}${isSharing ? ' · Você também está transmitindo' : ''}` : isSharing ? 'Você está transmitindo' : remoteStream ? 'Transmissão disponível' : 'Canal de voz'}</span></div>{isSharing && !watchingStream && <div className="quality" title="Limite configurado para o envio, não uma medição da transmissão">Perfil de envio: {sharingQuality}</div>}</div>
           <div ref={streamStageRef} className={`stream-stage ${isSharing ? 'own-stream' : ''} ${watchingStream ? 'watching-stream' : ''}`} onDoubleClick={() => { if (watchingStream) void toggleStreamFullscreen() }}>
             <div ref={remoteVideoRef} className="remote-video-frame" />
+            {watchingStream && <StreamAnnotations key={annotationSource?.sid} videoFrame={remoteVideoRef} frame={annotations.remote} />}
+            {localAnnotationSid && showLocalPreview && !watchingStream && <StreamAnnotations key={localAnnotationSid} videoFrame={remoteVideoRef} frame={annotations.local} publish={annotations.publish} />}
             {remoteStream && !watchingStream && <div className="stream-invite-card"><span className="stream-invite-icon"><ControlIcon name="screen" /></span><small>TRANSMISSÃO AO VIVO</small><strong>{streamPublisher || 'Alguém'} está transmitindo</strong><p>Entre para assistir ao jogo sem interromper a conversa.</p><button type="button" onClick={watchRemoteStream}>Assistir <span>→</span></button></div>}
             {!remoteStream && <div className="stage-empty"><span className="camp-icon">⌁</span><strong>{isSharing ? 'Sua tela está ao vivo' : `Você está em ${voiceChannelName}`}</strong><p>{isSharing ? 'Sua imagem está sendo compartilhada na call.' : 'Converse com a turma ou compartilhe uma tela para assistir juntos.'}</p></div>}
             {isSharing && <span className="live-label"><i /> VOCÊ ESTÁ AO VIVO</span>}
@@ -2173,22 +2262,50 @@ function App() {
           </div>
           {isSharing && <div className="stream-publisher-controls" role="group" aria-label="Controles da sua transmissão"><span>Sua transmissão</span><button type="button" onClick={() => setShowLocalPreview((value) => !value)}>{showLocalPreview ? 'Ocultar prévia' : 'Mostrar prévia'}</button><button type="button" onClick={() => void switchScreenShareSource()}>Trocar fonte</button><button className="stop" type="button" onClick={toggleScreenShare}>Encerrar transmissão</button></div>}
         </> : <>
-          <div className="stage-head"><div><p>#{selectedTextChannel}</p><span>Canal de texto da Barraca</span></div></div>
+          <div className="stage-head">
+            <div><p>#{selectedTextChannel}</p><span>Canal de texto da Barraca</span></div>
+            <a className="chat-whatsapp-action" href={whatsappInviteUrl} target="_blank" rel="noopener noreferrer">
+              Chamar a galera no WhatsApp
+            </a>
+          </div>
           <div className="text-channel-stage">
             {watchingStream && <section className="text-stream-mini-player" aria-label={`Transmissão de ${streamPublisher || 'um membro'}`}>
               <header><span><i /> AO VIVO</span><strong>{streamPublisher || 'Alguém'} está transmitindo</strong></header>
-              <div ref={streamMiniPlayerRef} className="text-stream-mini-video" />
+              <div className="text-stream-annotation-frame">
+                <div ref={streamMiniPlayerRef} className="text-stream-mini-video" />
+                <StreamAnnotations key={annotationSource?.sid} videoFrame={streamMiniPlayerRef} frame={annotations.remote} />
+              </div>
               {renderStreamPlaybackControls(true)}
             </section>}
             {remoteStream && !watchingStream && <button className="stream-channel-notice" type="button" onClick={() => { setStageView('voice'); watchRemoteStream() }}><span><ControlIcon name="screen" /></span><div><small>TRANSMISSÃO AO VIVO</small><strong>{streamPublisher || 'Alguém'} está transmitindo agora</strong></div><b>Assistir →</b></button>}
-            <div className="text-channel-intro"><span>#</span><div><strong>Bem-vindo a #{selectedTextChannel}</strong><p>Este é o começo do canal. As mensagens ficam guardadas na Barraca.</p></div></div>
-            <div className="text-message-list">
-              {textMessages.length ? textMessages.map((chat) => <article className={`text-message ${chat.installationId === getInstallationId() ? 'mine' : ''}`} key={chat.id}>
+            <div className="text-message-list" ref={textMessageListRef} tabIndex={0} role="region" aria-label="Histórico de mensagens"
+              onScroll={({ currentTarget: list }) => {
+                followChatRef.current = list.scrollHeight - list.clientHeight - list.scrollTop <= 48
+              }}>
+              <div className="text-channel-intro"><span>#</span><div><strong>Bem-vindo a #{selectedTextChannel}</strong><p>Este é o começo do canal. As mensagens ficam guardadas na Barraca.</p></div></div>
+              {textMessages.length ? textMessages.map((chat) => <article className={`text-message ${chat.installationId === viewerId ? 'mine' : ''}`} key={chat.id}
+                tabIndex={chat.installationId === viewerId || chatAdminCode ? 0 : undefined}
+                onContextMenu={(event) => {
+                  if (chat.installationId !== viewerId && !chatAdminCode) return
+                  event.preventDefault()
+                  const rect = event.currentTarget.getBoundingClientRect()
+                  setMemberMenu(null)
+                  setChatMenu({ id: chat.id, channel: selectedTextChannel, x: event.clientX || rect.left, y: event.clientY || rect.top })
+                }}>
                 {memberAvatar(chat.installationId, chat.author, 'text-avatar')}
-                <div><header><strong>{chat.installationId === getInstallationId() ? 'Você' : chat.author}</strong><time>{new Date(chat.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</time><button type="button" className="copy-chat-message" onClick={() => void copyChatMessage(chat)}>{copiedChatMessageId === chat.id ? 'Copiado' : 'Copiar'}</button></header><p><ChatMessageBody body={chat.body} /></p></div>
+                <div><header><strong>{chat.installationId === getInstallationId() ? 'Você' : chat.author}</strong><time>{new Date(chat.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</time>{!chat.media && <button type="button" className="copy-chat-message" onClick={() => void copyChatMessage(chat)}>{copiedChatMessageId === chat.id ? 'Copiado' : 'Copiar'}</button>}</header>{chat.media ? <ChatMessageMedia message={chat.media} endpoint={tokenEndpoint} installationId={viewerId} /> : <ChatMessageBody body={chat.body} endpoint={tokenEndpoint} installationId={viewerId} />}</div>
               </article>) : <p className="text-chat-empty">Esse canal ainda está quieto. Manda o primeiro salve.</p>}
             </div>
-            <form className="text-composer" onSubmit={sendTextMessage}><input value={textDraft} onChange={(event) => setTextDraft(event.target.value)} maxLength={1_000} disabled={barracaAccess !== 'available'} placeholder={barracaAccess === 'available' ? `Conversar em #${selectedTextChannel}` : 'Aguardando conexão com a Barraca…'} aria-label={`Conversar em #${selectedTextChannel}. Emojis: ${systemText.emojiKeys}`} /><span className="emoji-hint" title={systemText.emojiHint}>☺</span><button type="submit" disabled={!textDraft.trim() || barracaAccess !== 'available'} title="Enviar mensagem">Enviar <span>↑</span></button></form>
+            {chatMenu && selectedChatMessage && (selectedChatMessage.installationId === viewerId || chatAdminCode) && createPortal(
+              <section className="member-audio-menu chat-context-menu" aria-label="Opções da mensagem"
+                style={{ left: Math.max(8, Math.min(chatMenu.x, window.innerWidth - 188)), top: Math.max(8, Math.min(chatMenu.y, window.innerHeight - 60)) }}>
+                <button type="button" autoFocus onClick={() => void deleteChatMessage(chatMenu.id, chatMenu.channel, chatAdminCode)}>Excluir mensagem</button>
+              </section>, document.body,
+            )}
+            <form className="text-composer" onSubmit={sendTextMessage}><input value={textDraft} onChange={(event) => setTextDraft(event.target.value)} maxLength={1_000} disabled={barracaAccess !== 'available'} placeholder={barracaAccess === 'available' ? `Conversar em #${selectedTextChannel}` : 'Aguardando conexão com a Barraca…'} aria-label={`Conversar em #${selectedTextChannel}. Emojis: ${systemText.emojiKeys}`} /><ChatMedia key={selectedTextChannel} endpoint={tokenEndpoint} installationId={viewerId} channel={selectedTextChannel} microphone={microphoneDevice} disabled={barracaAccess !== 'available'} onMessage={(message) => {
+              followChatRef.current = true
+              setTextMessages((items) => items.some((item) => item.id === message.id) ? items : [...items, message])
+            }} /><span className="emoji-hint" title={systemText.emojiHint}>☺</span><button type="submit" disabled={!textDraft.trim() || barracaAccess !== 'available'} title="Enviar mensagem">Enviar <span>↑</span></button></form>
           </div>
         </>}
         {isSharing && screenAudioWarning && <div className="stream-audio-notice" role="status">{screenAudioWarning}</div>}
@@ -2228,7 +2345,6 @@ function App() {
       </aside>
     </section>
 
-    {connected && voiceShortcutPressed && <div className={`voice-shortcut-active ${voiceKeyMode}`} role="status"><span><ControlIcon name={voiceKeyMode === 'push-to-talk' ? 'microphone' : 'microphoneOff'} /></span><div><small>{voiceShortcutLabel}</small><strong>{voiceKeyMode === 'push-to-talk' ? 'VOCÊ ESTÁ FALANDO' : 'MICROFONE MUTADO'}</strong></div></div>}
     <div ref={remoteAudioRef} className="remote-audio-frame" aria-hidden="true" />
     {authorizedInstallation && profileTarget && <MemberProfile key={profileTarget.id} target={profileTarget} viewerId={viewerId}
       url={profileUrl(profileTarget.id)} close={() => setProfileTarget(null)}
@@ -2245,7 +2361,7 @@ function App() {
 
     {adminOpen && <div className="admin-overlay" role="dialog" aria-modal="true" aria-labelledby="admin-title"><section className="admin-card"><header><div><small>PAINEL DO ANFITRIÃO</small><h2 id="admin-title">Administrar a Barraca</h2></div><button type="button" onClick={() => setAdminOpen(false)} aria-label="Fechar">×</button></header><p className="admin-intro">Convites, membros e canais ficam sob seu controle.</p><div className="admin-unlock"><input value={adminCode} onChange={(event) => setAdminCode(event.target.value)} type="password" placeholder="Chave do anfitrião" /><button type="button" onClick={() => void refreshAdmin()} disabled={adminLoading}>{adminLoading ? 'Abrindo…' : adminData ? 'Atualizar' : 'Abrir painel'}</button></div>{adminData && <><div className="admin-summary"><span><b>{adminData.members.length}</b> autorizados</span><span><b>{Object.values(adminData.presence).reduce((total, people) => total + people.length, 0)}</b> na call</span></div><button className="admin-health" type="button" onClick={() => void testBarracaConnection()} disabled={adminLoading}>⌁ Testar conexão da Barraca</button><section className="admin-section"><div className="admin-section-head"><div><small>CONVITES</small><strong>Chame alguém para a Barraca</strong></div><button type="button" onClick={() => void createAdminInvite()} disabled={adminLoading}>＋ Gerar convite</button></div>{adminInvite && <div className="admin-invite"><code>{adminInvite}</code><button type="button" onClick={() => void navigator.clipboard.writeText(adminInvite)}>Copiar</button></div>}</section><section className="admin-section"><div className="admin-section-head"><div><small>CANAIS</small><strong>Organize a Barraca</strong></div></div><div className="admin-channel-create"><select value={newChannelType} onChange={(event) => setNewChannelType(event.target.value as 'text' | 'voice')}><option value="text">Canal de texto</option><option value="voice">Canal de voz</option></select><input value={newChannelName} onChange={(event) => setNewChannelName(event.target.value)} placeholder="Nome do canal" maxLength={32} /><button type="button" onClick={() => void createAdminChannel()} disabled={adminLoading}>Criar</button></div><div className="admin-channel-groups">{(['text', 'voice'] as const).map((type) => <div className="admin-channel-group" key={type}><small>{type === 'text' ? 'TEXTO' : 'VOZ'}</small>{adminData.channels[type].map((channel) => <article key={channel.id}>{editingChannel?.type === type && editingChannel.id === channel.id ? <><input value={editingChannelName} onChange={(event) => setEditingChannelName(event.target.value)} maxLength={32} autoFocus /><button type="button" onClick={() => void renameAdminChannel()} disabled={adminLoading}>Salvar</button><button type="button" onClick={() => setEditingChannel(null)}>Cancelar</button></> : <><span>{type === 'text' ? '#' : '◉'}</span><strong>{channel.name}</strong>{channel.protected ? <em>padrão</em> : <div><button type="button" onClick={() => { setEditingChannel({ type, id: channel.id }); setEditingChannelName(channel.name) }}>Renomear</button><button type="button" onClick={() => void deleteAdminChannel(type, channel)} disabled={adminLoading}>Remover</button></div>}</>}</article>)}</div>)}</div></section><section className="admin-section"><div className="admin-section-head"><div><small>MEMBROS</small><strong>Computadores autorizados</strong></div></div><div className="admin-members">{adminData.members.map((member) => <article key={member.installationId}><span>{member.name.slice(0, 1).toUpperCase()}</span><div><strong>{member.name}</strong><small>Autorizado em {new Date(member.authorizedAt).toLocaleDateString('pt-BR')}</small></div><button type="button" onClick={() => void removeMember(member)} disabled={adminLoading}>Remover</button></article>)}</div></section></>}<p className="admin-feedback">{adminMessage}</p></section></div>}
 
-    {settingsOpen && <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Configurações"><section className="settings-card"><header><div><small>AJUSTES DA SALA</small><h2>Configurações</h2></div><button type="button" onClick={closeSettings} aria-label="Fechar">×</button></header><div className="settings-section"><div className="settings-title"><strong>Áudio</strong><button type="button" onClick={() => void refreshDevices()}>Atualizar</button></div><label>Microfone<select value={microphoneDevice} onChange={(event) => void changeDevice('audioinput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microfone ${index + 1}`}</option>)}</select></label><label>Saída de áudio<select value={speakerDevice} onChange={(event) => void changeDevice('audiooutput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audiooutput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Saída ${index + 1}`}</option>)}</select></label><label className="volume-setting">Volume da galera <strong>{remoteVolume}%</strong><input type="range" min="0" max="100" value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} /></label><div className="microphone-test"><div><small>TESTE DE MICROFONE</small><strong>{connected ? (microphoneOn ? 'Seu microfone está ligado.' : 'Seu microfone está desligado.') : microphoneTestActive ? 'Fale normalmente para testar.' : 'Teste antes de entrar em uma call.'}</strong></div><div className="microphone-level" aria-label="Nível do microfone"><i style={{ width: `${microphoneTestLevel}%` }} /></div><button type="button" onClick={() => void toggleMicrophoneTest()} disabled={connected}>{microphoneTestActive ? 'Parar teste' : 'Testar microfone'}</button></div></div><div className="settings-section voice-shortcut-settings"><strong>Atalho de voz</strong><p>Funciona com o Barracord em foco. A tecla nunca é capturada enquanto você está digitando no chat.</p><label>Modo<select value={voiceKeyMode} onChange={(event) => void changeVoiceKeyMode(event.target.value as 'off' | 'push-to-talk' | 'push-to-mute')}><option value="off">Desligado</option><option value="push-to-talk">Apertar para falar</option><option value="push-to-mute">Apertar para mutar</option></select></label><label>Tecla<select value={voiceShortcut} onChange={(event) => setVoiceShortcut(event.target.value)} disabled={voiceKeyMode === 'off'}><option value="Space">Espaço</option><option value="KeyV">V</option><option value="KeyC">C</option><option value="CapsLock">Caps Lock</option></select></label>{voiceKeyMode !== 'off' && <div className="voice-shortcut-preview"><kbd>{voiceShortcutLabel}</kbd><span>{voiceKeyMode === 'push-to-talk' ? 'Segure para falar' : 'Segure para mutar'}</span></div>}</div><div className="settings-section"><strong>Qualidade da transmissão</strong><div className="quality-options"><button className={qualityProfile === 'smooth' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('smooth')}><b>Suave</b><span>720p · 30 fps</span></button><button className={qualityProfile === 'auto' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('auto')}><b>Automática</b><span>1080p · 30 fps</span></button><button className={qualityProfile === 'maximum' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('maximum')}><b>Máxima</b><span>1080p · 60 fps</span></button></div><p>As preferências são salvas neste computador e valem na próxima call ou transmissão.</p></div>{isHostApp && <div className="settings-section host-availability-setting"><strong>Barraca neste computador</strong><p>Quando o Barracord Anfitrião abrir, deixe a Barraca pronta para a galera. Fechar o app ainda encerra a Barraca.</p><label><input type="checkbox" checked={keepBarracaAvailable} onChange={(event) => setKeepBarracaAvailable(event.target.checked)} /> Manter a Barraca disponível ao abrir</label></div>}<button className="settings-done" type="button" onClick={closeSettings}>Pronto</button></section></div>}
+    {settingsOpen && <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Configurações"><section className="settings-card"><header><div><small>AJUSTES DA SALA</small><h2>Configurações</h2></div><button type="button" onClick={closeSettings} aria-label="Fechar">×</button></header><div className="settings-section"><div className="settings-title"><strong>Áudio</strong><button type="button" onClick={() => void refreshDevices()}>Atualizar</button></div><label>Microfone<select value={microphoneDevice} onChange={(event) => void changeDevice('audioinput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microfone ${index + 1}`}</option>)}</select></label><label>Saída de áudio<select value={speakerDevice} onChange={(event) => void changeDevice('audiooutput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audiooutput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Saída ${index + 1}`}</option>)}</select></label><label className="volume-setting">Volume da galera <strong>{remoteVolume}%</strong><input type="range" min="0" max="100" value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} /></label><div className="microphone-test"><div><small>TESTE DE MICROFONE</small><strong>{connected ? (microphoneOn ? 'Seu microfone está ligado.' : 'Seu microfone está desligado.') : microphoneTestActive ? 'Fale normalmente para testar.' : 'Teste antes de entrar em uma call.'}</strong></div><div className="microphone-level" aria-label="Nível do microfone"><i style={{ width: `${microphoneTestLevel}%` }} /></div><button type="button" onClick={() => void toggleMicrophoneTest()} disabled={connected}>{microphoneTestActive ? 'Parar teste' : 'Testar microfone'}</button></div></div><div className="settings-section"><strong>Qualidade da transmissão</strong><div className="quality-options"><button className={qualityProfile === 'smooth' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('smooth')}><b>Suave</b><span>720p · 30 fps</span></button><button className={qualityProfile === 'auto' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('auto')}><b>Automática</b><span>1080p · 30 fps</span></button><button className={qualityProfile === 'maximum' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('maximum')}><b>Máxima</b><span>1080p · 60 fps</span></button></div><p>As preferências são salvas neste computador e valem na próxima call ou transmissão.</p></div>{isHostApp && <div className="settings-section host-availability-setting"><strong>Barraca neste computador</strong><p>Quando o Barracord Anfitrião abrir, deixe a Barraca pronta para a galera. Fechar o app ainda encerra a Barraca.</p><label><input type="checkbox" checked={keepBarracaAvailable} onChange={(event) => setKeepBarracaAvailable(event.target.checked)} /> Manter a Barraca disponível ao abrir</label></div>}<button className="settings-done" type="button" onClick={closeSettings}>Pronto</button></section></div>}
 
     {!authorizedInstallation && <div className="join-overlay"><form className="join-card" onSubmit={authorizeInstallation}>
       <div className="join-brand"><span className="brand-symbol">B</span><div><small>BEM-VINDO À</small><strong>BARRACORD</strong></div></div>

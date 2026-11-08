@@ -126,7 +126,34 @@ static int captureWindow(HWND window, DWORD pid, uint32_t index, int total) {
     return FAILED(hr) ? fail(hr) : 0;
 }
 
+static int runIsoBackslashHotkey(const wchar_t* flags) {
+    wchar_t* end = nullptr;
+    const auto modifiers = wcstoul(flags, &end, 10);
+    if (end == flags || *end || modifiers > 15) return 1;
+
+    constexpr int hotkeyId = 1;
+    if (!RegisterHotKey(nullptr, hotkeyId, static_cast<UINT>(modifiers) | MOD_NOREPEAT, VK_OEM_102)) return 2;
+    MSG message{};
+    PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+    const auto threadId = GetCurrentThreadId();
+    std::thread([threadId] {
+        // The pipe closes when Electron exits, even if it crashes.
+        while (getchar() != EOF) {}
+        PostThreadMessageW(threadId, WM_QUIT, 0, 0);
+    }).detach();
+    puts("ready");
+    fflush(stdout);
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (message.message != WM_HOTKEY || message.wParam != hotkeyId) continue;
+        puts("pressed");
+        fflush(stdout);
+    }
+    UnregisterHotKey(nullptr, hotkeyId);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && wcscmp(argv[1], L"--iso-backslash-hotkey") == 0) return runIsoBackslashHotkey(argv[2]);
     if (argc < 2 || argc > 9) return fail(E_INVALIDARG);
     struct Source { HWND window; DWORD pid; };
     std::vector<Source> requested;

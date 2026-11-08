@@ -73,7 +73,6 @@ export default function VoiceChannelMembers({ channelName, people, selfIdentity,
     return <div className={classes} key={person.identity} aria-hidden={person.leaving || undefined} aria-label={[person.name, ...status].join(', ')}>
       {renderAvatar(person)}
       <strong>{person.name}{self && <small> {person.joining ? 'entrando…' : 'você'}</small>}</strong>
-      {speaking && <span className="voice-speaking-indicator" aria-hidden="true">▂▅▃</span>}
       {(playingSound || person.sharing || micMuted || person.deafened) && <span className="voice-member-status" aria-hidden="true">
         {playingSound && <span className="voice-soundboard-indicator" title="Tocando Soundboard"><SoundboardIcon /></span>}
         {person.sharing && <span className="voice-member-live" title="Transmitindo a tela"><ControlIcon name="screen" /></span>}

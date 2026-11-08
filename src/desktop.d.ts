@@ -7,6 +7,9 @@ interface Window {
   chriscordDesktop?: {
     isDesktop: boolean
     platform: string
+    registerCallShortcuts: (bindings: { id: string; accelerator: string }[]) => Promise<void>
+    onCallShortcut: (callback: (id: string) => void) => () => void
+    onCallShortcutRejected: (callback: (ids: string[]) => void) => () => void
     tailscaleStatus: () => Promise<{
       installed: boolean
       connected: boolean

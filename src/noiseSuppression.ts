@@ -139,8 +139,8 @@ export async function configureMicrophoneNoise(track: LocalAudioTrack, mode: Noi
   }
 }
 
-// Serialize mode changes and rapid push-to-talk actions. A release while the
-// first model is loading must not publish an open microphone afterwards.
+// Serialize mode changes and microphone toggles so disabling the microphone
+// while the first model is loading cannot leave it open afterwards.
 export class MicrophoneController {
   private queue: Promise<unknown> = Promise.resolve()
   private desiredEnabled = false

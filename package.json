@@ -3,7 +3,7 @@
   "description": "Sala privada da Barraca para voz, chat e compartilhamento de tela.",
   "author": "Chris",
   "private": true,
-  "version": "0.1.0-beta.23",
+  "version": "0.1.0-beta.24",
   "type": "module",
   "main": "electron/main.cjs",
   "desktopName": "barracord.desktop",

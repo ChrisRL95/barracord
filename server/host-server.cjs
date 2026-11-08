@@ -2,11 +2,13 @@ const dotenv = require('dotenv')
 const cors = require('cors')
 const express = require('express')
 const { AccessToken, RoomServiceClient, WebhookReceiver } = require('livekit-server-sdk')
-const { mkdirSync, readFileSync, writeFileSync } = require('node:fs')
+const { mkdirSync, readFileSync, renameSync, writeFileSync } = require('node:fs')
 const path = require('node:path')
 const { createTailscaleProvisioner } = require('./tailscale-provisioning.cjs')
 const { createSoundboard } = require('./soundboard.cjs')
-const { createProfiles } = require('./profiles.cjs')
+const { createProfiles, verifyMemberDevice } = require('./profiles.cjs')
+const { getLinkPreview } = require('./link-preview.cjs')
+const { createChatMedia } = require('./chat-media.cjs')
 
 dotenv.config({ path: process.env.BARRACORD_ENV_FILE || path.resolve(process.cwd(), '.env.server') })
 
@@ -65,7 +67,9 @@ function saveMembers() {
 }
 function saveMessages() {
   mkdirSync(path.dirname(messagesFile), { recursive: true })
-  writeFileSync(messagesFile, JSON.stringify(messages, null, 2), 'utf8')
+  const temporary = messagesFile + '.tmp'
+  writeFileSync(temporary, JSON.stringify(messages, null, 2), 'utf8')
+  renameSync(temporary, messagesFile)
 }
 function saveChannels() {
   mkdirSync(path.dirname(channelsFile), { recursive: true })
@@ -144,6 +148,12 @@ app.use('/profiles', (request, response, next) => {
   next()
 }, profiles.router)
 app.use(express.json({ limit: '8kb' }))
+const chatMedia = createChatMedia(path.resolve(dataDirectory, 'chat-media'), {
+  getMember: getAuthorizedMember,
+  hasChannel: (id) => typeof id === 'string' && Boolean(channelById('text', id)),
+  addMessage: addChatMessage,
+})
+app.use('/chat-media', chatMedia.router)
 app.use('/soundboard', createSoundboard(path.resolve(dataDirectory, 'soundboard'), (id) => (
   typeof id === 'string' && Object.hasOwn(members, id) ? getAuthorizedMember(id) : null
 )))
@@ -315,7 +325,7 @@ app.post('/presence/attention', (request, response) => {
   }
   attentionCooldowns.set(installationId, now + 10_000)
   attentionCooldowns.set(targetId, now + 10_000)
-  const event = `event: attention\ndata: ${JSON.stringify({ name: sender.name })}\n\n`
+  const event = `event: attention\ndata: ${JSON.stringify({ name: sender.name, senderId: installationId })}\n\n`
   for (const [stream] of recipients) stream.write(event)
   return response.status(204).end()
 })
@@ -461,8 +471,11 @@ app.delete('/admin/channels/:id', async (request, response) => {
     const participants = await roomService.listParticipants(channel.id)
     if (participants.length) return response.status(409).json({ error: 'Não é possível remover um canal de voz com pessoas na call.' })
   } else {
+    const previous = messages[channel.id] ?? []
     delete messages[channel.id]
-    saveMessages()
+    try { saveMessages() }
+    catch (error) { messages[channel.id] = previous; throw error }
+    for (const message of previous) if (message.media?.kind === 'voice') chatMedia.removeVoice(message.media.id)
   }
   channels[type] = channels[type].filter((item) => item.id !== channel.id)
   saveChannels()
@@ -486,6 +499,11 @@ app.delete('/admin/members/:installationId', async (request, response) => {
   return response.json({ ok: true, networkRemoved: Boolean(member.tailscaleDeviceId) })
 })
 
+app.get('/messages/preview', async (request, response) => {
+  if (!getAuthorizedMember(request.query.installationId)) return response.status(401).end()
+  return response.json({ preview: await getLinkPreview(request.query.url) })
+})
+
 app.get('/messages', (request, response) => {
   const channel = typeof request.query.channel === 'string' ? request.query.channel : ''
   const member = getAuthorizedMember(request.query.installationId)
@@ -500,11 +518,46 @@ app.post('/messages', (request, response) => {
   if (!member) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   if (!channelById('text', channel)) return response.status(400).json({ error: 'Canal de texto inválido.' })
   if (typeof body !== 'string' || !body.trim() || body.trim().length > 1_000) return response.status(400).json({ error: 'A mensagem deve ter entre 1 e 1000 caracteres.' })
-  const message = { id: crypto.randomUUID(), author: member.name, installationId, body: body.trim(), createdAt: new Date().toISOString() }
-  messages[channel] = [...(messages[channel] || []), message].slice(-500)
-  saveMessages()
-  return response.status(201).json({ message })
+  return response.status(201).json({ message: addChatMessage(channel, member, installationId, body.trim()) })
 })
+
+app.delete('/messages/:id', async (request, response) => {
+  const { channel, installationId } = request.body ?? {}
+  const isAdmin = request.body?.hostCode === hostCode
+  const member = getAuthorizedMember(installationId)
+  if (!isAdmin && !member) return response.status(401).json({ error: 'Entre na Barraca para excluir mensagens.' })
+  if (typeof channel !== 'string' || !channelById('text', channel)) {
+    return response.status(400).json({ error: 'Canal de texto inválido.' })
+  }
+  const find = () => (messages[channel] ?? []).find((message) => message.id === request.params.id)
+  const message = find()
+  if (!message) return response.sendStatus(204)
+  if (!isAdmin) {
+    if (message.installationId !== installationId) return response.status(403).json({ error: 'Você só pode excluir suas próprias mensagens.' })
+    const verified = await verifyMemberDevice(request, member, tailscaleProvisioner.getGuestDevice)
+    if (!verified || getAuthorizedMember(installationId) !== member) {
+      return response.status(403).json({ error: 'Não consegui confirmar seu computador na Rede da Barraca. Conecte o Tailscale e tente novamente.' })
+    }
+  }
+  if (find() !== message) return response.sendStatus(204)
+  const previous = messages[channel]
+  messages[channel] = previous.filter((item) => item !== message)
+  try { saveMessages() }
+  catch (error) { messages[channel] = previous; throw error }
+  if (message.media?.kind === 'voice') chatMedia.removeVoice(message.media.id)
+  return response.sendStatus(204)
+})
+
+function addChatMessage(channel, member, installationId, body, media) {
+  const message = { id: crypto.randomUUID(), author: member.name, installationId, body, createdAt: new Date().toISOString(), ...(media && { media }) }
+  const previous = messages[channel] ?? []
+  const evicted = previous.slice(0, Math.max(0, previous.length - 499))
+  messages[channel] = [...previous.slice(-499), message]
+  try { saveMessages() }
+  catch (error) { messages[channel] = previous; throw error }
+  for (const old of evicted) if (old.media?.kind === 'voice') chatMedia.removeVoice(old.media.id)
+  return message
+}
 
 function validateInstallation(installationId, participantName) {
   if (typeof installationId !== 'string' || !/^[a-z0-9-]{16,100}$/i.test(installationId)) return 'Não foi possível identificar esta instalação.'

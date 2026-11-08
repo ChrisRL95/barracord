@@ -7,7 +7,7 @@ import SoundboardIcon from './SoundboardIcon'
 import './Soundboard.css'
 
 type Sound = { id: string; name: string; emoji: string; author: string; owner: string; duration: number }
-type Props = { endpoint: string; installationId: string; room: Room | null; deafened: boolean; speaker: string; compact: boolean; onPlayingChange: (identity: string | null) => void }
+type Props = { endpoint: string; installationId: string; room: Room | null; deafened: boolean; speaker: string; compact: boolean; volume: number; onPlayingChange: (identity: string | null) => void }
 const topic = 'barracord.soundboard.v1'
 const soundId = /^[a-f0-9-]{36}$/
 const formatTime = (seconds: number) => seconds.toFixed(2).replace('.', ',') + ' s'
@@ -192,12 +192,17 @@ function SoundEditor({ cancel, save, speaker }: {
   </form>
 }
 
-export default function Soundboard({ endpoint, installationId, room, deafened, speaker, compact, onPlayingChange }: Props) {
+export default function Soundboard({ endpoint, installationId, room, deafened, speaker, compact, volume, onPlayingChange }: Props) {
   const dialog = useRef<HTMLDialogElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const search = useRef<HTMLInputElement>(null)
   const activeAudio = useRef<HTMLAudioElement | null>(null)
+  const volumeRef = useRef(volume)
+  useEffect(() => {
+    volumeRef.current = volume
+    if (activeAudio.current) activeAudio.current.volume = volume / 100
+  }, [volume])
   const lastPlay = useRef(-Infinity)
   const [sounds, setSounds] = useState<Sound[]>([])
   const [editing, setEditing] = useState(false)
@@ -259,6 +264,7 @@ export default function Soundboard({ endpoint, installationId, room, deafened, s
   const play = useCallback(async (id: string, identity: string) => {
     stopPlayback()
     const audio = new Audio(url('/' + id + '/audio').href)
+    audio.volume = volumeRef.current / 100
     activeAudio.current = audio
     const report = (playing: boolean) => {
       if (activeAudio.current === audio) onPlayingChange(playing ? identity : null)

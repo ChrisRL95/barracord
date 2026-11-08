@@ -14,12 +14,14 @@ type SinkAudio = HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> 
 
 const players = new Map<UiSound, SinkAudio>()
 let outputDevice = 'default'
+let volume = 1
 
 function player(sound: UiSound) {
   let audio = players.get(sound)
   if (!audio) {
     audio = new Audio(new URL(`sounds/${sound}.wav`, document.baseURI).href) as SinkAudio
     audio.preload = 'auto'
+    audio.volume = volume
     if (outputDevice !== 'default') void audio.setSinkId?.(outputDevice).catch(() => {})
     players.set(sound, audio)
   }
@@ -40,4 +42,9 @@ export function playUiSound(sound: UiSound) {
   const audio = player(sound)
   audio.currentTime = 0
   void audio.play().catch(() => {})
+}
+
+export function setUiSoundVolume(value: number) {
+  volume = value
+  players.forEach((audio) => { audio.volume = volume })
 }

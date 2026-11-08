@@ -3,6 +3,21 @@ const { randomUUID } = require('node:crypto')
 const { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } = require('node:fs')
 const path = require('node:path')
 
+const address = (value) => value?.replace(/^::ffff:/i, '').toLowerCase()
+
+async function verifyMemberDevice(request, member, getGuestDevice) {
+  const remote = address(request.socket.remoteAddress)
+  if (!remote || !member) return false
+  if (member.invite === 'anfitriao') {
+    return remote === '::1' || remote === '127.0.0.1' || remote === address(request.socket.localAddress)
+  }
+  if (!member.tailscaleDeviceId) return false
+  try {
+    const device = await getGuestDevice(member.tailscaleDeviceId)
+    return device.addresses.some((value) => address(value) === remote)
+  } catch { return false }
+}
+
 function imageBytes(value, limit) {
   if (value === '') return null
   if (typeof value !== 'string' || value.length > 4 * Math.ceil(limit / 3) || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) throw new Error('Imagem inválida ou muito grande.')
@@ -16,7 +31,6 @@ function createProfiles(directory, getMember, getGuestDevice) {
   const profiles = new Map()
   const validId = /^[a-z0-9-]{16,100}$/i
   const profilePath = (id) => path.join(directory, id + '.json')
-  const address = (value) => value?.replace(/^::ffff:/i, '').toLowerCase()
 
   function read(id) {
     if (profiles.has(id)) return profiles.get(id)
@@ -53,15 +67,7 @@ function createProfiles(directory, getMember, getGuestDevice) {
     const { id } = request.params
     if (id !== request.query.installationId) return response.status(403).json({ error: 'Você só pode editar seu próprio perfil.' })
     const member = getMember(id)
-    const remote = address(request.socket.remoteAddress)
-    let verified = member.invite === 'anfitriao' && Boolean(remote) &&
-      (remote === '::1' || remote === '127.0.0.1' || remote === address(request.socket.localAddress))
-    if (!verified && member.invite !== 'anfitriao' && member.tailscaleDeviceId) {
-      try {
-        const device = await getGuestDevice(member.tailscaleDeviceId)
-        verified = Boolean(remote) && device.addresses.some((value) => address(value) === remote)
-      } catch { /* Disallow writing if ownership cannot be verified. */ }
-    }
+    const verified = await verifyMemberDevice(request, member, getGuestDevice)
     if (!verified || getMember(id) !== member) return response.status(403).json({ error: 'Não consegui confirmar seu computador na Rede da Barraca. Conecte o Tailscale e tente de novo.' })
     const { bio, color, avatar, banner } = request.body || {}
     if (typeof bio !== 'string' || bio.length > 180 || typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) {
@@ -95,4 +101,4 @@ function createProfiles(directory, getMember, getGuestDevice) {
   } }
 }
 
-module.exports = { createProfiles }
+module.exports = { createProfiles, verifyMemberDevice }

@@ -14,6 +14,17 @@ contextBridge.exposeInMainWorld('chriscordDesktop', {
   hostAdminCode: () => ipcRenderer.invoke('host:admin-code'),
   setStreamFullscreen: (enabled) => ipcRenderer.invoke('stream:set-fullscreen', enabled),
   appVersion: () => ipcRenderer.invoke('app:version'),
+  registerCallShortcuts: (bindings) => ipcRenderer.invoke('shortcuts:register', bindings),
+  onCallShortcut: (callback) => {
+    const listener = (_event, id) => callback(id)
+    ipcRenderer.on('shortcuts:pressed', listener)
+    return () => ipcRenderer.removeListener('shortcuts:pressed', listener)
+  },
+  onCallShortcutRejected: (callback) => {
+    const listener = (_event, ids) => callback(ids)
+    ipcRenderer.on('shortcuts:rejected', listener)
+    return () => ipcRenderer.removeListener('shortcuts:rejected', listener)
+  },
   updateState: () => ipcRenderer.invoke('update:state'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
