@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { MouseEvent, ReactNode } from 'react'
 import SoundboardIcon from './SoundboardIcon'
 import ControlIcon from './ControlIcon'
 
@@ -12,10 +12,28 @@ type Props = {
   speakingIdentities: string[]
   soundboardIdentity: string | null
   renderAvatar: (person: VoicePerson) => ReactNode
+  renderName: (person: VoicePerson) => ReactNode
+  renderBanner?: (person: VoicePerson) => ReactNode
+  onMemberMenu?: (event: MouseEvent<HTMLDivElement>, person: VoicePerson) => void
+  grid?: boolean
 }
 
 const leaveAnimationMs = 180
 const byName = new Intl.Collator('pt-BR', { sensitivity: 'base' })
+
+function tiltCard({ currentTarget, clientX, clientY }: MouseEvent<HTMLDivElement>) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  const { left, top, width, height } = currentTarget.getBoundingClientRect()
+  const angle = (position: number, start: number, size: number) =>
+    Math.max(-9, Math.min(9, ((position - start) / size - 0.5) * 18))
+  currentTarget.style.setProperty('--card-tilt-x', `${-angle(clientY, top, height)}deg`)
+  currentTarget.style.setProperty('--card-tilt-y', `${angle(clientX, left, width)}deg`)
+}
+
+function resetCardTilt({ currentTarget }: MouseEvent<HTMLDivElement>) {
+  currentTarget.style.removeProperty('--card-tilt-x')
+  currentTarget.style.removeProperty('--card-tilt-y')
+}
 
 type ShownPerson = VoicePerson & { leaving?: boolean }
 
@@ -59,10 +77,10 @@ function useLeavingPeople(people: VoicePerson[]): ShownPerson[] {
     .sort((a, b) => byName.compare(a.name, b.name) || byName.compare(a.identity, b.identity))
 }
 
-export default function VoiceChannelMembers({ channelName, people, selfIdentity, speakingIdentities, soundboardIdentity, renderAvatar }: Props) {
+export default function VoiceChannelMembers({ channelName, people, selfIdentity, speakingIdentities, soundboardIdentity, renderAvatar, renderName, renderBanner, onMemberMenu, grid }: Props) {
   const shown = useLeavingPeople(people)
   if (!shown.length) return null
-  return <div className="voice-channel-members" aria-label={`Pessoas em ${channelName}`}>{shown.map((person) => {
+  return <div className={grid ? 'voice-channel-members voice-participant-grid' : 'voice-channel-members'} aria-label={`Pessoas em ${channelName}`}>{shown.map((person) => {
     const self = person.identity === selfIdentity
     const speaking = !person.leaving && speakingIdentities.includes(person.identity)
     const playingSound = !person.leaving && person.identity === soundboardIdentity
@@ -70,9 +88,12 @@ export default function VoiceChannelMembers({ channelName, people, selfIdentity,
     // Silenciar tudo já desliga o microfone, então só o fone aparece.
     const micMuted = person.muted && !person.deafened
     const status = [speaking && 'falando', playingSound && 'tocando Soundboard', person.joining && 'entrando', person.sharing && 'transmitindo a tela', micMuted && 'microfone mutado', person.deafened && 'áudio silenciado'].filter(Boolean)
-    return <div className={classes} key={person.identity} aria-hidden={person.leaving || undefined} aria-label={[person.name, ...status].join(', ')}>
+    return <div className={classes} key={person.identity} onContextMenu={(event) => onMemberMenu?.(event, person)}
+      onMouseMove={grid ? tiltCard : undefined} onMouseLeave={grid ? resetCardTilt : undefined}
+      aria-hidden={person.leaving || undefined} aria-label={[person.name, ...status].join(', ')}>
+      {renderBanner?.(person)}
       {renderAvatar(person)}
-      <strong>{person.name}{self && <small> {person.joining ? 'entrando…' : 'você'}</small>}</strong>
+      <strong>{renderName(person)}{self && <small> {person.joining ? 'entrando…' : 'você'}</small>}</strong>
       {(playingSound || person.sharing || micMuted || person.deafened) && <span className="voice-member-status" aria-hidden="true">
         {playingSound && <span className="voice-soundboard-indicator" title="Tocando Soundboard"><SoundboardIcon /></span>}
         {person.sharing && <span className="voice-member-live" title="Transmitindo a tela"><ControlIcon name="screen" /></span>}

@@ -54,13 +54,14 @@ function createProfiles(directory, getMember, getGuestDevice) {
     response.json({ profile: read(id) })
   })
 
-  router.get('/:id/avatar', (request, response) => {
-    const { id } = request.params
+  router.get('/:id/:image', (request, response) => {
+    const { id, image } = request.params
+    if (image !== 'avatar' && image !== 'banner') return response.sendStatus(404)
     if (!validId.test(id) || !getMember(id)) return response.sendStatus(404)
     const profile = read(id)
-    if (!profile?.avatar) return response.sendStatus(404)
+    if (!profile?.[image]) return response.sendStatus(404)
     response.set('Cache-Control', request.query.v === profile.revision ? 'private, max-age=300' : 'private, no-store')
-    response.set('X-Content-Type-Options', 'nosniff').type('jpeg').send(Buffer.from(profile.avatar, 'base64'))
+    response.set('X-Content-Type-Options', 'nosniff').type('jpeg').send(Buffer.from(profile[image], 'base64'))
   })
 
   router.put('/:id', express.json({ limit: '420kb' }), async (request, response) => {
@@ -69,7 +70,12 @@ function createProfiles(directory, getMember, getGuestDevice) {
     const member = getMember(id)
     const verified = await verifyMemberDevice(request, member, getGuestDevice)
     if (!verified || getMember(id) !== member) return response.status(403).json({ error: 'Não consegui confirmar seu computador na Rede da Barraca. Conecte o Tailscale e tente de novo.' })
-    const { bio, color, avatar, banner } = request.body || {}
+    const { bio, color, avatar, banner, nickColor = '', font = '', frame = '', effect = '', badge = '' } = request.body || {}
+    if (typeof nickColor !== 'string' || (nickColor && !/^#[0-9a-f]{6}$/i.test(nickColor)) ||
+        !['', 'rounded', 'retro', 'mono'].includes(font) || !['', 'neon', 'gold', 'holo'].includes(frame) ||
+        !['', 'glow', 'shine'].includes(effect) || typeof badge !== 'string' || badge.length > 24 || /[\p{Cc}\p{Bidi_Control}]/u.test(badge)) {
+      return response.status(400).json({ error: 'Confira as opções de estilo e o selo de até 24 caracteres.' })
+    }
     if (typeof bio !== 'string' || bio.length > 180 || typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) {
       return response.status(400).json({ error: 'Confira a cor e a bio de até 180 caracteres.' })
     }
@@ -77,7 +83,7 @@ function createProfiles(directory, getMember, getGuestDevice) {
       imageBytes(avatar, 64 * 1024)
       imageBytes(banner, 240 * 1024)
     } catch (error) { return response.status(400).json({ error: error.message }) }
-    const profile = { bio: bio.trim(), color, avatar, banner, revision: randomUUID() }
+    const profile = { bio: bio.trim(), color, avatar, banner, nickColor, font, frame, effect, badge: badge.trim(), revision: randomUUID() }
     const temporary = profilePath(id) + '.' + profile.revision + '.tmp'
     mkdirSync(directory, { recursive: true })
     try {
@@ -95,9 +101,14 @@ function createProfiles(directory, getMember, getGuestDevice) {
     const status = error.status === 413 || error.status === 400 ? error.status : 500
     response.status(status).json({ error: status === 413 ? 'As imagens do perfil ficaram muito grandes.' : 'Não foi possível processar o perfil.' })
   })
-  return { router, avatarRevision: (id) => {
-    try { const profile = read(id); return profile?.avatar ? profile.revision : undefined }
-    catch { return undefined }
+  return { router, appearance: (id) => {
+    try {
+      const profile = read(id)
+      if (!profile) return {}
+      const { nickColor, font, frame, badge, color, effect } = profile
+      const bannerRevision = profile.banner ? profile.revision : undefined
+      return { avatarRevision: profile.avatar ? profile.revision : undefined, appearance: { nickColor, font, frame, badge, color, effect, bannerRevision } }
+    } catch { return {} }
   } }
 }
 

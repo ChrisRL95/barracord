@@ -1,5 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono&family=Outfit:wght@400;500;600;700&display=swap');
-:root { scrollbar-color: #78659a #181520; }
+:root { scrollbar-color: #648e9b #151e20; }
 * { box-sizing: border-box; scrollbar-width: thin; }
 body { margin: 0; min-width: 320px; background: #0b0d10; color: #f3f5ed; font-family: Outfit, Arial, sans-serif; }
 button, input { font: inherit; }

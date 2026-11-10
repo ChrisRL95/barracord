@@ -9,6 +9,7 @@ const { createSoundboard } = require('./soundboard.cjs')
 const { createProfiles, verifyMemberDevice } = require('./profiles.cjs')
 const { getLinkPreview } = require('./link-preview.cjs')
 const { createChatMedia } = require('./chat-media.cjs')
+const { createRadio } = require('./radio.cjs')
 
 dotenv.config({ path: process.env.BARRACORD_ENV_FILE || path.resolve(process.cwd(), '.env.server') })
 
@@ -192,6 +193,12 @@ let presenceSnapshot = null
 let presenceSnapshotJson = ''
 let presenceRefreshRunning = null
 let presenceRefreshQueued = false
+const radio = createRadio({
+  getMember: getAuthorizedMember,
+  currentChannel: (id) => presenceSnapshot?.members.find((member) => member.installationId === id)?.channelId,
+  hostCode,
+})
+app.use('/radio', radio.router)
 
 function isSharingScreen(participant) {
   return Boolean(participant.tracks?.some((track) => track.source === 3 || track.source === 'SCREEN_SHARE'))
@@ -221,7 +228,7 @@ async function readPresence() {
     channelId,
     streaming: isSharingScreen(participant),
   })))
-  const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, avatarRevision: profiles.avatarRevision(installationId), ...activeMemberStatus(installationId, callsByInstallation) }))
+  const memberList = Object.entries(members).map(([installationId, member]) => ({ installationId, name: member.name, ...profiles.appearance(installationId), ...activeMemberStatus(installationId, callsByInstallation) }))
   return { channels: channelsPresence, members: memberList }
 }
 
@@ -233,6 +240,7 @@ async function refreshPresence() {
   const snapshot = await readPresence()
   const json = JSON.stringify(snapshot)
   presenceSnapshot = snapshot
+  radio.clearInactive(snapshot.channels)
   if (json === presenceSnapshotJson) return snapshot
   presenceSnapshotJson = json
   presenceSubscribers.forEach((subscriber) => sendPresence(subscriber, json))
@@ -308,12 +316,22 @@ app.get('/presence/stream', (request, response) => {
   else void schedulePresenceRefresh()
 })
 
-app.post('/presence/attention', (request, response) => {
+app.post(['/presence/attention', '/presence/share-request'], (request, response) => {
   const { installationId, targetId } = request.body ?? {}
+  const kind = request.path === '/presence/share-request' ? 'share-request' : 'attention'
   const sender = getAuthorizedMember(installationId)
   if (!sender) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   if (installationId === targetId || !getAuthorizedMember(targetId)) {
     return response.status(400).json({ error: 'Escolha outro membro da Barraca.' })
+  }
+  let channelId
+  if (kind === 'share-request') {
+    const senderChannel = presenceSnapshot?.members.find((member) => member.installationId === installationId)?.channelId
+    const targetChannel = presenceSnapshot?.members.find((member) => member.installationId === targetId)?.channelId
+    if (!senderChannel || senderChannel !== targetChannel) {
+      return response.status(409).json({ error: 'O pedido de transmissão só pode ser enviado a alguém na mesma call.' })
+    }
+    channelId = senderChannel
   }
   const recipients = [...attentionSubscribers].filter(([stream, id]) => id === targetId && !stream.destroyed && !stream.writableEnded)
   if (!recipients.length) return response.status(409).json({ error: 'Esse membro está com o Barracord fechado ou indisponível.' })
@@ -321,11 +339,11 @@ app.post('/presence/attention', (request, response) => {
   const now = Date.now()
   for (const [id, until] of attentionCooldowns) if (until <= now) attentionCooldowns.delete(id)
   if (attentionCooldowns.has(installationId) || attentionCooldowns.has(targetId)) {
-    return response.status(429).json({ error: 'Aguarde alguns segundos para chamar atenção novamente.' })
+    return response.status(429).json({ error: 'Aguarde alguns segundos para enviar outro aviso.' })
   }
   attentionCooldowns.set(installationId, now + 10_000)
   attentionCooldowns.set(targetId, now + 10_000)
-  const event = `event: attention\ndata: ${JSON.stringify({ name: sender.name, senderId: installationId })}\n\n`
+  const event = `event: ${kind}\ndata: ${JSON.stringify({ name: sender.name, senderId: installationId, channelId })}\n\n`
   for (const [stream] of recipients) stream.write(event)
   return response.status(204).end()
 })
@@ -475,7 +493,7 @@ app.delete('/admin/channels/:id', async (request, response) => {
     delete messages[channel.id]
     try { saveMessages() }
     catch (error) { messages[channel.id] = previous; throw error }
-    for (const message of previous) if (message.media?.kind === 'voice') chatMedia.removeVoice(message.media.id)
+    for (const message of previous) if (message.media?.kind === 'voice' || message.media?.kind === 'image') chatMedia.removeMessageMedia(message.media.id, message.media.kind)
   }
   channels[type] = channels[type].filter((item) => item.id !== channel.id)
   saveChannels()
@@ -509,16 +527,23 @@ app.get('/messages', (request, response) => {
   const member = getAuthorizedMember(request.query.installationId)
   if (!member) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   if (!channelById('text', channel)) return response.status(400).json({ error: 'Canal de texto inválido.' })
-  return response.json({ messages: (messages[channel] || []).slice(-100) })
+  const history = messages[channel] ?? []
+  const byId = new Map(history.map((message) => [message.id, message]))
+  return response.json({ messages: history.slice(-100).map((message) => withReplyPreview(message, byId.get(message.replyTo), request.query.installationId)) })
 })
 
 app.post('/messages', (request, response) => {
-  const { channel, body, installationId } = request.body || {}
+  const { channel, body, installationId, replyTo } = request.body || {}
   const member = getAuthorizedMember(installationId)
   if (!member) return response.status(401).json({ error: 'Este computador ainda não está autorizado na Barraca.' })
   if (!channelById('text', channel)) return response.status(400).json({ error: 'Canal de texto inválido.' })
   if (typeof body !== 'string' || !body.trim() || body.trim().length > 1_000) return response.status(400).json({ error: 'A mensagem deve ter entre 1 e 1000 caracteres.' })
-  return response.status(201).json({ message: addChatMessage(channel, member, installationId, body.trim()) })
+  try {
+    return response.status(201).json({ message: addChatMessage(channel, member, installationId, body.trim(), undefined, replyTo) })
+  } catch (error) {
+    if (error.status === 409) return response.status(409).json({ error: error.message })
+    throw error
+  }
 })
 
 app.delete('/messages/:id', async (request, response) => {
@@ -544,19 +569,62 @@ app.delete('/messages/:id', async (request, response) => {
   messages[channel] = previous.filter((item) => item !== message)
   try { saveMessages() }
   catch (error) { messages[channel] = previous; throw error }
-  if (message.media?.kind === 'voice') chatMedia.removeVoice(message.media.id)
+  if (message.media?.kind === 'voice' || message.media?.kind === 'image') chatMedia.removeMessageMedia(message.media.id, message.media.kind)
   return response.sendStatus(204)
 })
 
-function addChatMessage(channel, member, installationId, body, media) {
-  const message = { id: crypto.randomUUID(), author: member.name, installationId, body, createdAt: new Date().toISOString(), ...(media && { media }) }
+const chatReactionOptions = new Set(['👍', '❤️', '😂', '🔥', '😮', '🎉'])
+
+app.put('/messages/:id/reaction', (request, response) => {
+  const { channel, installationId, emoji, active } = request.body ?? {}
+  const member = getAuthorizedMember(installationId)
+  if (!member) return response.sendStatus(401)
+  if (typeof channel !== 'string' || !channelById('text', channel) || !chatReactionOptions.has(emoji) || typeof active !== 'boolean') return response.sendStatus(400)
+  const message = (messages[channel] ?? []).find((item) => item.id === request.params.id)
+  if (!message) return response.sendStatus(404)
+  const previous = message.reactions
+  const users = new Set(previous?.[emoji] ?? [])
+  if (active) users.add(installationId)
+  else users.delete(installationId)
+  message.reactions = { ...previous }
+  if (users.size) message.reactions[emoji] = [...users]
+  else delete message.reactions[emoji]
+  try { saveMessages() }
+  catch (error) { message.reactions = previous; throw error }
+  return response.json({ reactions: summarizeReactions(message, installationId) })
+})
+
+function summarizeReactions(message, viewer) {
+  return Object.entries(message.reactions ?? {}).map(([emoji, ids]) => ({
+    emoji, count: ids.length, mine: ids.includes(viewer),
+    names: ids.map((id) => getAuthorizedMember(id)?.name).filter(Boolean),
+  }))
+}
+
+function withReplyPreview(message, original, viewer) {
+  const { reactions, ...publicMessage } = message
+  return {
+    ...publicMessage,
+    ...(reactions && { reactions: summarizeReactions(message, viewer) }),
+    ...(message.replyTo && { replyPreview: original ? {
+      author: original.author,
+      body: original.body.slice(0, 160),
+      ...(original.media?.kind === 'sticker' && { sticker: original.media }),
+    } : null }),
+  }
+}
+
+function addChatMessage(channel, member, installationId, body, media, replyTo) {
   const previous = messages[channel] ?? []
+  const original = typeof replyTo === 'string' ? previous.find((item) => item.id === replyTo) : undefined
+  if (replyTo !== undefined && !original) throw Object.assign(new Error('A mensagem original não está mais disponível.'), { status: 409 })
+  const message = { id: crypto.randomUUID(), author: member.name, installationId, body, createdAt: new Date().toISOString(), ...(media && { media }), ...(original && { replyTo: original.id }) }
   const evicted = previous.slice(0, Math.max(0, previous.length - 499))
   messages[channel] = [...previous.slice(-499), message]
   try { saveMessages() }
   catch (error) { messages[channel] = previous; throw error }
-  for (const old of evicted) if (old.media?.kind === 'voice') chatMedia.removeVoice(old.media.id)
-  return message
+  for (const old of evicted) if (old.media?.kind === 'voice' || old.media?.kind === 'image') chatMedia.removeMessageMedia(old.media.id, old.media.kind)
+  return withReplyPreview(message, original, installationId)
 }
 
 function validateInstallation(installationId, participantName) {

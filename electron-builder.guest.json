@@ -21,6 +21,7 @@
     "releaseType": "prerelease"
   },
   "win": {
+    "icon": "electron/app-icon.ico",
     "target": [
       "nsis"
     ],
@@ -42,6 +43,7 @@
     "createStartMenuShortcut": true
   },
   "linux": {
+    "icon": "electron/app-icon.png",
     "target": [
       "AppImage",
       "rpm"

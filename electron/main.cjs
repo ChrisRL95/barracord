@@ -241,6 +241,7 @@ function finishPendingShareRequest(request, streams) {
 
 function createWindow() {
   const window = new BrowserWindow({
+    icon: path.join(__dirname, 'app-icon.png'),
     width: 1440,
     height: 940,
     minWidth: 980,

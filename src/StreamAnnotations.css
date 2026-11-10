@@ -14,7 +14,8 @@
   filter: drop-shadow(0 1px 2px #12091b);
 }
 .stream-annotation-layer.drawing { pointer-events: auto; touch-action: none; cursor: crosshair; }
-.annotation-pointer { fill: #ee8cff; stroke: #fff0ff; stroke-width: 1.5; }
+.annotation-pointer { fill: currentColor; stroke: #fff; stroke-width: 1.5; }
+.annotation-author { fill: currentColor; stroke: #101820; stroke-width: 2px; paint-order: stroke; font-size: 12px; font-weight: 700; }
 .stream-annotation-tools {
   position: absolute;
   right: 10px;

@@ -19,7 +19,7 @@
 .app-header .app-update.available,
 .app-header .app-update.downloading { border-color: #3b4a43; background: transparent; color: #8fb9a0; }
 .app-header .app-update.download-error,
-.app-header .app-update.install-error { color: #ffe0a1; background: #42331f; border-color: #82643f; }
+.app-header .app-update.install-error { color: #ffa1c5; background: #1f3842; border-color: #823f59; }
 
 /* Aviso de atualização pronta: mesmo lugar e formato do aviso de recuperação do anfitrião. */
 .app-update-notice { position: fixed; z-index: 71; right: 24px; bottom: 24px; display: flex; width: min(430px, calc(100vw - 32px)); align-items: center; gap: 11px; border: 1px solid #476e5b; border-radius: 11px; padding: 12px; background: #13201af5; box-shadow: 0 18px 48px #000b; color: #d5efe0; backdrop-filter: blur(12px); animation: app-update-notice-in 200ms ease-out; }
@@ -35,7 +35,7 @@
 .app-update-actions button.restart { border-color: #57b68a; background: #2f6b4f; color: #f1fff7; }
 .app-update-actions button.restart:hover:not(:disabled) { background: #3a8060; }
 .app-update-actions button:disabled { opacity: .5; cursor: default; }
-.app-update-notice.install-error { border-color: #82643f; background: #241c11f5; }
-.app-update-notice.install-error > i { background: #d6a85a; color: #261a07; }
+.app-update-notice.install-error { border-color: #823f59; background: #111f24f5; }
+.app-update-notice.install-error > i { background: #d65a8a; color: #091c24; }
 @keyframes app-update-notice-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .app-update-notice { animation: none; } }

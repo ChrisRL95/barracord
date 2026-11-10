@@ -27,6 +27,7 @@
     }
   ],
   "win": {
+    "icon": "electron/app-icon.ico",
     "target": ["nsis"]
   },
   "nsis": {

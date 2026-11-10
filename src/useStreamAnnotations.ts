@@ -8,7 +8,7 @@ export type Stroke = { tool: Tool; points: Point[] }
 export type Frame = { strokes: Stroke[]; preview?: Stroke }
 type Source = { identity: string; sid: string }
 export const empty: Frame = { strokes: [] }
-const topic = 'barracord.annotations.v1'
+const topic = 'barracord.annotations.v2'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 export const maxStrokes = 24
@@ -22,78 +22,135 @@ function validStroke(value: unknown): value is Stroke {
       point.every((n) => Number.isInteger(n) && n >= 0 && n <= 1000))
 }
 
-export function useStreamAnnotations(room: Room | null, localSid: string | undefined, source: Source | null) {
-  const [local, setLocal] = useState<{ sid: string; frame: Frame } | null>(null)
-  const [remote, setRemote] = useState<Frame>(empty)
-  const published = useRef({ sid: '', frame: empty, sequence: 0, lastPreview: 0 })
+export type Contributor = { identity: string; name: string; frame: Frame }
+
+function useBoard(room: Room | null, sid: string | undefined, publisher: string | undefined) {
+  const [own, setOwn] = useState<{ sid: string; frame: Frame } | null>(null)
+  const [others, setOthers] = useState<{ sid: string; people: Contributor[] } | null>(null)
+  const [clearVersion, setClearVersion] = useState(0)
+  const sent = useRef({ sid: '', frame: empty, sequence: 0, lastPreview: 0 })
+  const clearContributors = useRef<(() => void) | null>(null)
+  const self = room?.localParticipant.identity
+
+  function send(data: object, reliable: boolean) {
+    if (!room || !sid) return
+    const current = sent.current
+    void room.localParticipant.publishData(encoder.encode(JSON.stringify({ ...data, sid, sequence: ++current.sequence })), { topic, reliable }).catch(() => {})
+  }
 
   function publish(frame: Frame, reliable: boolean) {
-    if (!room || !localSid) return
-    if (published.current.sid !== localSid) published.current = { sid: localSid, frame: empty, sequence: 0, lastPreview: 0 }
-    const current = published.current
+    if (!room || !sid) return
+    if (sent.current.sid !== sid) sent.current = { sid, frame: empty, sequence: 0, lastPreview: 0 }
+    const current = sent.current
     current.frame = frame
-    setLocal({ sid: localSid, frame })
+    setOwn({ sid, frame })
     if (!reliable && performance.now() - current.lastPreview < 45) return
     current.lastPreview = performance.now()
-    const data = reliable ? frame : { preview: frame.preview }
-    void room.localParticipant.publishData(encoder.encode(JSON.stringify({ sid: localSid, sequence: ++current.sequence, ...data })), { topic, reliable }).catch(() => {})
+    send(reliable ? { strokes: frame.strokes } : { preview: frame.preview }, reliable)
+  }
+
+  function clearAll() {
+    if (!sid || self !== publisher) return
+    publish(empty, true)
+    clearContributors.current?.()
+    send({ clear: true }, true)
   }
 
   useEffect(() => {
-    if (!room) return
-    const onRequest = (bytes: Uint8Array, participant?: { identity: string }, _kind?: unknown, incomingTopic?: string) => {
-      if (incomingTopic !== topic || !participant || !localSid || bytes.length > 256) return
-      let request
-      try { request = JSON.parse(decoder.decode(bytes)) } catch { return }
-      if (request?.request !== localSid) return
-      const current = published.current
-      const frame = current.sid === localSid ? current.frame : empty
-      void room.localParticipant.publishData(encoder.encode(JSON.stringify({ sid: localSid, sequence: current.sid === localSid ? ++current.sequence : 0, strokes: frame.strokes })), {
-        topic, reliable: true, destinationIdentities: [participant.identity],
-      }).catch(() => {})
+    if (!room || !sid || !publisher) return
+    const authors = new Map<string, { person: Contributor; commit: number; sequence: number; timer?: number }>()
+    const refresh = () => setOthers({ sid, people: [...authors.values()].map(({ person }) => person) })
+    const clear = () => {
+      for (const entry of authors.values()) {
+        window.clearTimeout(entry.timer)
+        entry.commit = entry.sequence
+        entry.person = { ...entry.person, frame: empty }
+      }
+      refresh()
     }
-    room.on(RoomEvent.DataReceived, onRequest)
-    return () => { room.off(RoomEvent.DataReceived, onRequest) }
-  }, [room, localSid])
-
-  const remoteSid = source?.sid
-  const remoteIdentity = source?.identity
-  useEffect(() => {
-    if (!room || !remoteSid || !remoteIdentity) return
-    let sequence = -1
-    let commitSequence = -1
-    let timer: number | undefined
-    const onData = (bytes: Uint8Array, participant?: { identity: string }, _kind?: unknown, incomingTopic?: string) => {
-      if (incomingTopic !== topic || participant?.identity !== remoteIdentity || bytes.length > 12_000) return
+    clearContributors.current = clear
+    const request = () => void room.localParticipant.publishData(encoder.encode(JSON.stringify({ sid, request: true })), { topic, reliable: true }).catch(() => {})
+    const disconnected = (participant: { identity: string }) => {
+      window.clearTimeout(authors.get(participant.identity)?.timer)
+      authors.delete(participant.identity)
+      refresh()
+    }
+    const onData = (bytes: Uint8Array, participant?: { identity: string; name?: string }, _kind?: unknown, incomingTopic?: string) => {
+      if (incomingTopic !== topic || !participant || bytes.length > 12_000) return
       let data
       try { data = JSON.parse(decoder.decode(bytes)) } catch { return }
-      if (data?.sid !== remoteSid || !Number.isSafeInteger(data.sequence)) return
-      if (Array.isArray(data.strokes) && data.strokes.length <= maxStrokes && data.strokes.every(validStroke) && data.sequence > commitSequence) {
-        commitSequence = data.sequence
-        if (data.sequence >= sequence) {
-          sequence = data.sequence
-          window.clearTimeout(timer)
-          setRemote({ strokes: data.strokes })
-        } else setRemote((frame) => ({ ...frame, strokes: data.strokes }))
-      } else if (validStroke(data.preview) && data.sequence > sequence) {
-        sequence = data.sequence
-        setRemote((frame) => ({ ...frame, preview: data.preview }))
-        window.clearTimeout(timer)
-        timer = window.setTimeout(() => setRemote((frame) => ({ strokes: frame.strokes })), 1200)
+      if (data?.sid !== sid) return
+      const current = sent.current
+      if (data.request === true) {
+        if (current.sid === sid && current.frame.strokes.length) {
+          void room?.localParticipant.publishData(encoder.encode(JSON.stringify({ sid, sequence: ++current.sequence, strokes: current.frame.strokes })), {
+            topic, reliable: true, destinationIdentities: [participant.identity],
+          }).catch(() => {})
+        }
+        return
       }
+      if (!Number.isSafeInteger(data.sequence)) return
+      if (data.clear === true) {
+        if (participant.identity !== publisher) return
+        clear()
+        if (current.sid === sid) {
+          current.frame = empty
+          void room.localParticipant.publishData(encoder.encode(JSON.stringify({ sid, sequence: ++current.sequence, strokes: [] })), { topic, reliable: true }).catch(() => {})
+        }
+        setOwn({ sid, frame: empty })
+        setClearVersion((version) => version + 1)
+        return
+      }
+      const entry = authors.get(participant.identity) ?? {
+        person: { identity: participant.identity, name: participant.name || 'Participante', frame: empty }, commit: -1, sequence: -1, timer: undefined,
+      }
+      const frame = entry.person.frame
+      if (Array.isArray(data.strokes) && data.strokes.length <= maxStrokes && data.strokes.every(validStroke) && data.sequence > entry.commit) {
+        entry.commit = data.sequence
+        if (data.sequence >= entry.sequence) {
+          entry.sequence = data.sequence
+          window.clearTimeout(entry.timer)
+          entry.person = { ...entry.person, frame: { strokes: data.strokes } }
+        } else entry.person = { ...entry.person, frame: { ...frame, strokes: data.strokes } }
+      } else if (validStroke(data.preview) && data.sequence > entry.sequence) {
+        entry.sequence = data.sequence
+        entry.person = { ...entry.person, frame: { ...frame, preview: data.preview } }
+        window.clearTimeout(entry.timer)
+        entry.timer = window.setTimeout(() => {
+          entry.person = { ...entry.person, frame: { strokes: entry.person.frame.strokes } }
+          refresh()
+        }, 1200)
+      } else return
+      authors.set(participant.identity, entry)
+      refresh()
     }
-    const request = () => void room.localParticipant.publishData(encoder.encode(JSON.stringify({ request: remoteSid })), {
-      topic, reliable: true, destinationIdentities: [remoteIdentity],
-    }).catch(() => {})
     room.on(RoomEvent.DataReceived, onData)
     room.on(RoomEvent.Reconnected, request)
+    room.on(RoomEvent.ParticipantDisconnected, disconnected)
     request()
     return () => {
       room.off(RoomEvent.DataReceived, onData)
       room.off(RoomEvent.Reconnected, request)
-      window.clearTimeout(timer)
-      setRemote(empty)
+      room.off(RoomEvent.ParticipantDisconnected, disconnected)
+      for (const entry of authors.values()) window.clearTimeout(entry.timer)
+      clearContributors.current = null
+      setOthers(null)
     }
-  }, [room, remoteSid, remoteIdentity])
-  return { local: local?.sid === localSid ? local?.frame ?? empty : empty, remote, publish }
+  }, [room, sid, publisher])
+
+  return {
+    frame: own?.sid === sid ? own?.frame ?? empty : empty,
+    people: others?.sid === sid ? others?.people ?? [] : [],
+    self: self || '',
+    identities: room ? [room.localParticipant.identity, ...room.remoteParticipants.keys()] : [],
+    clearVersion,
+    publish: sid ? publish : undefined,
+    clearAll: sid && self === publisher ? clearAll : undefined,
+  }
+}
+
+export function useStreamAnnotations(room: Room | null, localSid: string | undefined, source: Source | null) {
+  const local = useBoard(room, localSid, room?.localParticipant.identity)
+  const remote = useBoard(room, source?.sid, source?.identity)
+  return { local, remote }
 }

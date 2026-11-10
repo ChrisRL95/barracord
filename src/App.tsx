@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { LocalAudioTrack, LocalVideoTrack, Room, RoomEvent, Track, VideoQuality } from 'livekit-client'
@@ -13,8 +13,8 @@ import VoiceChannelMembers from './VoiceChannelMembers'
 import ControlIcon from './ControlIcon'
 import { playUiSound, preloadUiSounds, setUiSoundOutput, setUiSoundVolume } from './uiSounds'
 import type { VoicePerson } from './VoiceChannelMembers'
-import MemberProfile, { ProfileAvatar } from './MemberProfile'
-import type { ProfileTarget } from './MemberProfile'
+import MemberProfile, { ProfileAvatar, ProfileName } from './MemberProfile'
+import type { ProfileAppearance, ProfileTarget } from './MemberProfile'
 import KeyboardShortcuts from './KeyboardShortcuts'
 import ChatLinkPreview from './ChatLinkPreview'
 import ChatMedia, { ChatMessageMedia } from './ChatMedia'
@@ -25,12 +25,16 @@ import { backgroundAccelerator, loadShortcuts, shortcutModifiers, shortcutsKey }
 import UpdateButton from './UpdateButton'
 import type { ShareSource, ShareAudioMode } from './SharePicker'
 import { readCallPing } from './callPing'
+import Radio from './Radio'
 import attentionSound from './assets/attention.ogg?url'
 import { MicrophoneController, configureMicrophoneNoise, loadNoiseMode, microphoneCaptureOptions, noiseModeLabels } from './noiseSuppression'
 import type { NoiseMode } from './noiseSuppression'
 import './App.css'
 import './desktop.css'
 import './rework.css'
+import './brand-preview.css'
+import previewMark from './assets/brand-preview/mark.png'
+import previewWordmark from './assets/brand-preview/wordmark.png'
 
 const defaultUrl = import.meta.env.VITE_LIVEKIT_URL ?? ''
 const defaultTokenEndpoint = import.meta.env.VITE_TOKEN_ENDPOINT ?? 'http://localhost:3001/token'
@@ -53,7 +57,7 @@ type HostStatus = { state: 'stopped' | 'starting' | 'running' | 'error'; message
 type ChannelPresence = Record<string, Array<{ identity: string; name: string; muted?: boolean; deafened?: boolean; sharing?: boolean }>>
 type Channel = { id: string; name: string; protected: boolean }
 type ChannelCatalog = { text: Channel[]; voice: Channel[] }
-type PresenceMember = { installationId: string; name: string; status: 'online' | 'away' | 'em-call' | 'streaming' | 'offline'; channelId: string | null; avatarRevision?: string }
+type PresenceMember = { installationId: string; name: string; status: 'online' | 'away' | 'em-call' | 'streaming' | 'offline'; channelId: string | null; avatarRevision?: string; appearance?: ProfileAppearance }
 type AdminMember = { installationId: string; name: string; authorizedAt: string; networkLinked?: boolean }
 type AdminInvite = { code: string; label: string; createdAt: string; expiresAt: string | null; usedAt: string | null; status: 'ativo' | 'usado' | 'revogado' | 'expirado'; activationReady?: boolean }
 type AdminData = { members: AdminMember[]; presence: ChannelPresence; channels: ChannelCatalog; invites: AdminInvite[]; metrics?: { streamCount: number; estimatedUploadMbps: number } }
@@ -171,6 +175,8 @@ function App() {
   const [roomName, setRoomName] = useState('geral')
   const [selectedTextChannel, setSelectedTextChannel] = useState('geral')
   const [stageView, setStageView] = useState<'text' | 'voice'>('text')
+  const [callChatOpen, setCallChatOpen] = useState(false)
+  const [shareRequest, setShareRequest] = useState<{ name: string; channelId: string } | null>(null)
   const [activeVoiceChannel, setActiveVoiceChannel] = useState<string | null>(null)
   const [pendingVoiceChannel, setPendingVoiceChannel] = useState<string | null>(null)
   const [channelCatalog, setChannelCatalog] = useState<ChannelCatalog>(defaultChannelCatalog)
@@ -210,6 +216,11 @@ function App() {
   const [joiningVoiceChannel, setJoiningVoiceChannel] = useState<string | null>(null)
   const [profileTarget, setProfileTarget] = useState<ProfileTarget | null>(null)
   const [textMessages, setTextMessages] = useState<ChatMessage[]>([])
+  const [pastedChatImage, setPastedChatImage] = useState<{ channel: string; file: File } | null>(null)
+  const pendingChatReactions = useRef(new Set<string>())
+  const [chatReply, setChatReply] = useState<{ channel: string; message: ChatMessage } | null>(null)
+  const [unreadChat, setUnreadChat] = useState<{ channel: string; id: string } | null>(null)
+  const chatInputRef = useRef<HTMLInputElement>(null)
   const textMessageListRef = useRef<HTMLDivElement>(null)
   const followChatRef = useRef(true)
   const [textDraft, setTextDraft] = useState('')
@@ -594,10 +605,16 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [attentionNotice])
 
-  async function callAttention(targetId: string, name: string) {
+  useEffect(() => {
+    if (!shareRequest) return
+    const timer = window.setTimeout(() => setShareRequest(null), 20_000)
+    return () => window.clearTimeout(timer)
+  }, [shareRequest])
+
+  async function callAttention(targetId: string, name: string, kind: 'attention' | 'share-request' = 'attention') {
     setMemberMenu(null)
     try {
-      const endpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence/attention')
+      const endpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/presence/' + kind)
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -607,7 +624,7 @@ function App() {
         const body = await response.json().catch(() => null)
         throw new Error(body?.error || 'Não foi possível enviar o aviso. Confira se o anfitrião está atualizado.')
       }
-      setAttentionNotice({ text: `Aviso enviado para ${name}.` })
+      setAttentionNotice({ text: kind === 'share-request' ? `Pedido de transmissão enviado para ${name}.` : `Aviso enviado para ${name}.` })
     } catch (cause) {
       setAttentionNotice({ text: cause instanceof Error ? cause.message : 'Não foi possível enviar o aviso.', error: true })
     }
@@ -683,6 +700,12 @@ function App() {
           }
         })().catch(() => {})
       })
+      stream.addEventListener('share-request', (event) => {
+        try {
+          const { name, channelId } = JSON.parse((event as MessageEvent<string>).data)
+          if (!cancelled && typeof name === 'string' && typeof channelId === 'string') setShareRequest({ name, channelId })
+        } catch { /* ignore a malformed notification */ }
+      })
       stream.addEventListener('presence', (event) => {
         streamLive = true
         try { applyPresenceRef.current(JSON.parse((event as MessageEvent<string>).data) as { channels?: ChannelPresence; members?: PresenceMember[] }) } catch { /* ignore a malformed update */ }
@@ -740,6 +763,7 @@ function App() {
   useEffect(() => {
     if (!authorizedInstallation) return
     let cancelled = false
+    let lastId: string | undefined
     const loadMessages = async () => {
       const revision = chatRevision.current
       try {
@@ -749,7 +773,15 @@ function App() {
         if (response.status === 401) { if (!cancelled) returnToActivation(); return }
         if (!response.ok || cancelled) return
         const body = await response.json() as { messages?: ChatMessage[] }
-        if (!cancelled && revision === chatRevision.current && body.messages) setTextMessages(body.messages)
+        if (!cancelled && revision === chatRevision.current && body.messages) {
+          const index = lastId ? body.messages.findIndex((item) => item.id === lastId) : -1
+          const incoming = index >= 0 ? body.messages[index + 1] : undefined
+          if (incoming && !followChatRef.current) {
+            setUnreadChat((current) => current?.channel === selectedTextChannel ? current : { channel: selectedTextChannel, id: incoming.id })
+          }
+          lastId = body.messages.at(-1)?.id
+          setTextMessages(body.messages)
+        }
       } catch {
         // The text channel will refresh when the Barraca is available again.
       }
@@ -874,6 +906,8 @@ function App() {
     setWatchingStream(false)
     setActiveVoiceChannel(null)
     setStageView('text')
+    setCallChatOpen(false)
+    setShareRequest(null)
     setSpeakingIdentities([])
     participantAudioRef.current = {}
     setParticipantAudio({})
@@ -1696,13 +1730,16 @@ function App() {
       const messagesEndpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/messages')
       const response = await fetch(messagesEndpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel: selectedTextChannel, body, installationId: getInstallationId() }),
+        body: JSON.stringify({ channel: selectedTextChannel, body, installationId: getInstallationId(), replyTo: activeChatReply?.id }),
       })
       const result = await response.json() as { message?: ChatMessage; error?: string }
       if (response.status === 401) { returnToActivation(); return }
       if (!response.ok || !result.message) throw new Error(result.error ?? 'Não foi possível enviar a mensagem.')
-      setTextMessages((messages) => [...messages, result.message!])
+      const sent = result.message
+      followChatRef.current = true
+      setTextMessages((messages) => messages.some((item) => item.id === sent.id) ? messages : [...messages, sent])
       setTextDraft('')
+      setChatReply((current) => current === chatReply ? null : current)
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Não foi possível enviar a mensagem.', 'error') }
   }
 
@@ -1715,6 +1752,23 @@ function App() {
       setCopiedChatMessageId(chat.id)
       window.setTimeout(() => setCopiedChatMessageId((current) => current === chat.id ? '' : current), 1_800)
     } catch { setMessage('Não foi possível copiar esta mensagem.') }
+  }
+
+  async function reactToChatMessage(chat: ChatMessage, emoji: string) {
+    if (pendingChatReactions.current.has(chat.id)) return
+    pendingChatReactions.current.add(chat.id)
+    try {
+      const response = await fetch(`${adminEndpoint('/messages')}/${encodeURIComponent(chat.id)}/reaction`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: selectedTextChannel, installationId: getInstallationId(), emoji, active: !chat.reactions?.find((item) => item.emoji === emoji)?.mine }),
+      })
+      if (!response.ok) throw new Error('Não foi possível reagir à mensagem.')
+      const { reactions } = await response.json()
+      chatRevision.current++
+      setTextMessages((items) => items.map((item) => item.id === chat.id ? { ...item, reactions } : item))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Não foi possível reagir à mensagem.', 'error')
+    } finally { pendingChatReactions.current.delete(chat.id) }
   }
 
   async function deleteChatMessage(id: string, channel: string, hostCode?: string) {
@@ -2149,25 +2203,39 @@ function App() {
   }) : fallbackMembers
   const viewerId = getInstallationId()
   const profileMembers = new Map(presenceMembers.map((member) => [member.installationId, member]))
-  function profileUrl(id: string, avatarRevision?: string) {
-    const query = new URLSearchParams({ installationId: viewerId, ...(avatarRevision ? { v: avatarRevision } : {}) })
+  function profileUrl(id: string, revision?: string, image: 'avatar' | 'banner' = 'avatar') {
+    const query = new URLSearchParams({ installationId: viewerId, ...(revision ? { v: revision } : {}) })
     const endpoint = tokenEndpoint.trim().replace(/\/token\/?$/, '/profiles')
-    return `${endpoint}/${encodeURIComponent(id)}${avatarRevision ? '/avatar' : ''}?${query}`
+    return `${endpoint}/${encodeURIComponent(id)}${revision ? '/' + image : ''}?${query}`
   }
   function memberAvatar(id: string, name: string, className: string) {
     const member = profileMembers.get(id)
     const revision = member?.avatarRevision
     return <ProfileAvatar name={member?.name || name} className={className + ' ' + avatarTone(id)}
       image={revision ? profileUrl(id, revision) : undefined}
+      frame={member?.appearance?.frame}
       onClick={() => setProfileTarget({ id, name: member?.name || name })} />
+  }
+  function memberName(id: string, name: string) {
+    return <ProfileName name={name} appearance={profileMembers.get(id)?.appearance} />
   }
   const memberGroups = (['streaming', 'em-call', 'online', 'away', 'offline'] as const).map((status) => ({ status, members: directoryMembers.filter((member) => member.status === status).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')) })).filter((group) => group.members.length)
   const estimatedUploadMbps = adminData?.metrics?.estimatedUploadMbps ?? 0
   const uploadLoad = estimatedUploadMbps / hostUploadLimit
   const uploadAlert = estimatedUploadMbps === 0 ? 'normal' : uploadLoad >= .9 ? 'critical' : uploadLoad >= .7 ? 'warning' : 'normal'
   const showingVoiceStage = connected && stageView === 'voice'
+  const showingCallChat = showingVoiceStage && callChatOpen && !streamFullscreen
+  const pingStatus = isReconnecting ? 'Reconectando…' : callPing === null ? 'Medindo…' : `${callPing} ms`
+  const pingQuality = callPing === null ? 'Aguardando medição' : callPing < 100 ? 'Latência baixa' : callPing < 200 ? 'Latência moderada' : 'Latência alta'
   const chatAdminCode = adminCode.trim() && (isHostApp || adminData) ? adminCode : undefined
   const selectedChatMessage = chatMenu?.channel === selectedTextChannel ? textMessages.find((item) => item.id === chatMenu.id) : undefined
+  const activeChatReply = chatReply?.channel === selectedTextChannel ? chatReply.message : undefined
+  const unreadMessageId = unreadChat?.channel === selectedTextChannel ? unreadChat.id : undefined
+  function replyToChatMessage(message: ChatMessage) {
+    setChatMenu(null)
+    setChatReply({ channel: selectedTextChannel, message })
+    chatInputRef.current?.focus()
+  }
   const whatsappMessage = connected && voiceChannelName
     ? `Tô na call ${voiceChannelName} do Barracord. Bora entrar?`
     : 'Bora entrar no Barracord?'
@@ -2177,19 +2245,19 @@ function App() {
   const annotations = useStreamAnnotations(annotationRoom, localAnnotationSid, watchingStream && remoteStream ? annotationSource : null)
   useLayoutEffect(() => {
     followChatRef.current = true
-  }, [selectedTextChannel, showingVoiceStage])
+  }, [selectedTextChannel, showingVoiceStage, showingCallChat])
 
   useLayoutEffect(() => {
     const list = textMessageListRef.current
     if (list && followChatRef.current) list.scrollTop = list.scrollHeight
-  }, [selectedTextChannel, showingVoiceStage, textMessages])
+  }, [selectedTextChannel, showingVoiceStage, showingCallChat, textMessages])
   const barracaUnavailable = authorizedInstallation && barracaAccess === 'unavailable'
   const barracaChecking = authorizedInstallation && barracaAccess === 'checking'
   const connectionLabel = isReconnecting ? 'Reconectando…' : barracaChecking ? 'Conferindo acesso…' : barracaUnavailable ? 'Barraca indisponível' : connectionUnavailable ? 'Sem conexão' : connected ? `Em ${voiceChannelName}` : authorizedInstallation ? 'Na Barraca' : networkText
 
-  return <main className={`barracord-app ${streamFullscreen ? 'stream-window-fullscreen' : ''}`}>
+  return <main className={`barracord-app brand-preview ${streamFullscreen ? 'stream-window-fullscreen' : ''}`}>
     <header className="app-header">
-      <div className="brand"><span className="brand-symbol">B</span><span>BARRACORD</span><small>v{appVersion}</small></div>
+      <div className="brand"><img className="brand-preview-mark" src={previewMark} alt="" /><img className="brand-preview-wordmark" src={previewWordmark} alt="Barracord" /><small>v{appVersion}</small></div>
       <div className={`network-status ${isReconnecting ? 'reconnecting' : barracaUnavailable || connectionUnavailable ? 'offline' : tailscaleStatus === 'ready' || authorizedInstallation ? 'online' : ''}`}><i />{connectionLabel}</div>
       {window.chriscordDesktop && isHostApp && <button className={`host-header-action ${hostStatus.state}`} type="button" onClick={() => void toggleHost()} disabled={hostStatus.state === 'starting'} title={hostStateDetail}><i />{hostStateLabel}</button>}
       {window.chriscordDesktop && isHostApp && startWithWindowsAvailable && <button className={`host-header-action startup-action ${startWithWindows ? 'running' : ''}`} type="button" onClick={() => void changeStartWithWindows(!startWithWindows)}>{startWithWindows ? 'Inicia com Windows' : 'Iniciar com Windows'}</button>}
@@ -2207,15 +2275,20 @@ function App() {
       {attentionNotice.sender?.id
         ? memberAvatar(attentionNotice.sender.id, attentionNotice.sender.name, 'member-avatar attention-avatar')
         : <i aria-hidden="true">{attentionNotice.sender?.name.slice(0, 1).toUpperCase() || '!'}</i>}
-      <div><small>CHAMAR ATENÇÃO</small><strong>{attentionNotice.text}</strong></div>
+      <div><small>AVISO DA BARRACA</small><strong>{attentionNotice.text}</strong></div>
       <button type="button" onClick={() => setAttentionNotice(null)} aria-label="Fechar aviso">?</button>
     </aside>}
+    {shareRequest && connected && !isReconnecting && !isSharing && shareRequest.channelId === activeVoiceChannel &&
+      <aside className="host-recovery-toast share-request-toast" aria-label="Pedido de transmissão">
+        <div role="status"><small>PEDIDO DE TRANSMISSÃO</small><strong>{shareRequest.name} pediu para você compartilhar a tela.</strong></div>
+        <button type="button" onClick={() => { setShareRequest(null); void toggleScreenShare() }}>Escolher tela</button>
+        <button type="button" onClick={() => setShareRequest(null)}>Dispensar</button>
+      </aside>}
     {hostRecoveryNotice && <aside className={`host-recovery-toast ${hostRecoveryNotice.kind}`} role="status"><i>{hostRecoveryNotice.kind === 'success' ? '✓' : '!'}</i><div><small>{hostRecoveryNotice.kind === 'success' ? 'RECUPERAÇÃO CONCLUÍDA' : 'AÇÃO NECESSÁRIA'}</small><strong>{hostRecoveryNotice.text}</strong></div><button type="button" onClick={() => setHostRecoveryNotice(null)} aria-label="Fechar aviso">×</button></aside>}
     {barracaUnavailable && <section className="barraca-unavailable-notice" role="status"><div><small>CONEXÃO COM A BARRACA</small><strong>A Barraca não respondeu.</strong><span>Ela pode estar fechada, ou a Rede da Barraca ainda pode estar iniciando neste computador.</span></div><button type="button" onClick={() => void verifyBarracaAccess()}>Tentar novamente</button></section>}
 
-    <section className={`room-layout${showingVoiceStage ? '' : ' chat-layout'}`}>
+    <section className={`room-layout${!showingVoiceStage || showingCallChat ? ' chat-layout' : ''}`}>
       <aside className="room-nav">
-        <div className="room-nav-title"><span className="room-nav-mark">B</span><strong>Barraca</strong><button type="button" onClick={openSettings} title="Configurações da Barraca" aria-label="Configurações da Barraca">⚙</button></div>
         <div className="channel-navigation">
           <div className="nav-label">CANAIS DE TEXTO</div>
           {textChannels.map((channel) => <button key={channel.id} className={`room-pill ${selectedTextChannel === channel.id && stageView === 'text' ? 'active' : ''}`} type="button" onClick={() => { setSelectedTextChannel(channel.id); setStageView('text') }}><span>#</span>{channel.name}</button>)}
@@ -2225,14 +2298,19 @@ function App() {
             const active = activeVoiceChannel === channel.id && stageView === 'voice'
             return <section className={`voice-channel-entry ${active ? 'active' : ''}`} key={channel.id}>
               <button className={`room-pill voice-pill ${active ? 'active' : ''}`} type="button" onClick={() => requestVoiceChannel(channel.id)} disabled={isConnecting || barracaAccess !== 'available'} title={people.map((person) => person.name).join(', ')}><span>◉</span>{channel.name}<b>{activeVoiceChannel === channel.id ? 'na call' : joiningVoiceChannel === channel.id ? 'entrando…' : people.length || ''}</b></button>
-              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} soundboardIdentity={activeVoiceChannel === channel.id ? soundboardIdentity : null} renderAvatar={(person) => memberAvatar(person.identity, person.name, 'voice-channel-avatar')} />
+              <VoiceChannelMembers channelName={channel.name} people={people} selfIdentity={selfIdentity} speakingIdentities={activeVoiceChannel === channel.id ? speakingIdentities : []} soundboardIdentity={activeVoiceChannel === channel.id ? soundboardIdentity : null} renderAvatar={(person) => memberAvatar(person.identity, person.name, 'voice-channel-avatar')} renderName={(person) => memberName(person.identity, person.name)} />
             </section>
           })}
         </div>
         <footer className="room-nav-footer">
           <section className="nav-call-panel">
             {connected && <div className={`nav-call-status ${isReconnecting ? 'reconnecting' : ''}`}><i /><span className="nav-call-description"><strong>{isReconnecting ? 'Reconectando…' : 'Voz conectada'}</strong><small>{voiceChannelName}</small></span>
-              <span className={`call-ping ${isReconnecting || callPing === null ? 'unknown' : callPing < 100 ? 'good' : callPing < 200 ? 'fair' : 'poor'}`} title={isReconnecting ? 'Reconectando à call' : callPing === null ? 'Ping da call ainda indisponível' : 'Ping da call: ida e volta até o servidor de mídia. Atualizado a cada 3 segundos.'}><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1" y="10" width="3" height="5" rx="1" /><rect x="6" y="6" width="3" height="9" rx="1" /><rect x="11" y="1" width="3" height="14" rx="1" /></svg><span>{isReconnecting || callPing === null ? '— ms' : `${callPing} ms`}</span></span>
+              <details className="call-ping-details">
+                <summary className={`call-ping ${isReconnecting || callPing === null ? 'unknown' : callPing < 100 ? 'good' : callPing < 200 ? 'fair' : 'poor'}`} aria-label={`Detalhes da conexão: ${pingStatus}`} title={isReconnecting ? 'Reconectando ao servidor de voz' : `${pingQuality} · Tempo de ida e volta ao servidor de mídia`}>
+                  <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1" y="10" width="3" height="5" rx="1" /><rect x="6" y="6" width="3" height="9" rx="1" /><rect x="11" y="1" width="3" height="14" rx="1" /></svg><span>{pingStatus}</span>
+                </summary>
+                <div><strong>{isReconnecting ? 'Reconectando ao servidor de voz' : pingQuality}</strong><small>Tempo de ida e volta até o servidor de mídia. A medição é atualizada a cada 3 segundos.</small></div>
+              </details>
             </div>}
             <div className={`control-dock ${connected ? 'voice-actions' : ''}`}>
               {connected && <>
@@ -2243,71 +2321,155 @@ function App() {
               {connected && <button className="leave-button" type="button" onClick={disconnect} title="Sair da call" aria-label="Sair da call"><ControlIcon name="leave" /></button>}
             </div>
             {connected && <button className={`screen-control ${isSharing ? 'broadcasting' : ''}`} type="button" onClick={toggleScreenShare} title={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'} aria-label={isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}><ControlIcon name="screen" /><span>{isSharing ? 'Encerrar transmissão' : 'Compartilhar tela'}</span></button>}
+            {authorizedInstallation && <Radio endpoint={tokenEndpoint} installationId={viewerId} channel={connected ? activeVoiceChannel : null}
+              speaker={speakerDevice} deafened={deafened} hostCode={adminData ? adminCode : undefined} />}
           </section>
           <div className="nav-user">{memberAvatar(viewerId, participantName || 'Você', 'mini-avatar')}<div><strong>{participantName || 'Você'}</strong><small>{connected ? `em ${voiceChannelName}` : 'na Barraca'}</small></div><button type="button" onClick={openSettings} title="Configurações" aria-label="Configurações"><ControlIcon name="settings" /></button></div>
         </footer>
       </aside>
 
       <section className="stage-card">
-        {showingVoiceStage ? <>
+        <div className={`stage-workspace${showingCallChat ? ' with-call-chat' : ''}`}>
+        {showingVoiceStage && <div className="voice-workspace">
+          <div className="voice-workspace-actions">
+            <button type="button" aria-expanded={showingCallChat} aria-controls={showingCallChat ? 'call-chat' : undefined} onClick={() => setCallChatOpen((open) => !open)}>{showingCallChat ? 'Fechar chat' : 'Abrir chat'}</button>
+          </div>
           <div className="stage-head"><div><p>◉ {voiceChannelName}</p><span>{watchingStream ? `Assistindo ${streamPublisher}${isSharing ? ' · Você também está transmitindo' : ''}` : isSharing ? 'Você está transmitindo' : remoteStream ? 'Transmissão disponível' : 'Canal de voz'}</span></div>{isSharing && !watchingStream && <div className="quality" title="Limite configurado para o envio, não uma medição da transmissão">Perfil de envio: {sharingQuality}</div>}</div>
           <div ref={streamStageRef} className={`stream-stage ${isSharing ? 'own-stream' : ''} ${watchingStream ? 'watching-stream' : ''}`} onDoubleClick={() => { if (watchingStream) void toggleStreamFullscreen() }}>
             <div ref={remoteVideoRef} className="remote-video-frame" />
-            {watchingStream && <StreamAnnotations key={annotationSource?.sid} videoFrame={remoteVideoRef} frame={annotations.remote} />}
-            {localAnnotationSid && showLocalPreview && !watchingStream && <StreamAnnotations key={localAnnotationSid} videoFrame={remoteVideoRef} frame={annotations.local} publish={annotations.publish} />}
+            {watchingStream && <StreamAnnotations key={annotationSource?.sid} videoFrame={remoteVideoRef} {...annotations.remote} />}
+            {localAnnotationSid && showLocalPreview && !watchingStream && <StreamAnnotations key={localAnnotationSid} videoFrame={remoteVideoRef} {...annotations.local} />}
             {remoteStream && !watchingStream && <div className="stream-invite-card"><span className="stream-invite-icon"><ControlIcon name="screen" /></span><small>TRANSMISSÃO AO VIVO</small><strong>{streamPublisher || 'Alguém'} está transmitindo</strong><p>Entre para assistir ao jogo sem interromper a conversa.</p><button type="button" onClick={watchRemoteStream}>Assistir <span>→</span></button></div>}
-            {!remoteStream && <div className="stage-empty"><span className="camp-icon">⌁</span><strong>{isSharing ? 'Sua tela está ao vivo' : `Você está em ${voiceChannelName}`}</strong><p>{isSharing ? 'Sua imagem está sendo compartilhada na call.' : 'Converse com a turma ou compartilhe uma tela para assistir juntos.'}</p></div>}
+            {!remoteStream && (!isSharing || !showLocalPreview) && <VoiceChannelMembers grid channelName={voiceChannelName || 'call'} people={visibleChannelPresence[activeVoiceChannel ?? ''] ?? []}
+              selfIdentity={selfIdentity} speakingIdentities={speakingIdentities} soundboardIdentity={soundboardIdentity}
+              renderAvatar={(person) => memberAvatar(person.identity, person.name, 'voice-channel-avatar')}
+              renderName={(person) => memberName(person.identity, person.name)}
+              renderBanner={(person) => {
+                const appearance = profileMembers.get(person.identity)?.appearance
+                const revision = appearance?.bannerRevision
+                return <div className="member-profile-card voice-participant-banner" data-effect={appearance?.effect} aria-hidden="true">
+                  <div className="member-profile-banner" style={{ backgroundColor: appearance?.color }}>
+                    {revision && <img src={profileUrl(person.identity, revision, 'banner')} alt="" loading="lazy" />}
+                  </div>
+                </div>
+              }}
+              onMemberMenu={(event, person) => {
+                if (person.identity === selfIdentity) return
+                event.preventDefault()
+                setChatMenu(null)
+                setMemberMenu({ id: person.identity, x: event.clientX, y: event.clientY })
+              }} />}
             {isSharing && <span className="live-label"><i /> VOCÊ ESTÁ AO VIVO</span>}
             {watchingStream && renderStreamPlaybackControls()}
           </div>
           {isSharing && <div className="stream-publisher-controls" role="group" aria-label="Controles da sua transmissão"><span>Sua transmissão</span><button type="button" onClick={() => setShowLocalPreview((value) => !value)}>{showLocalPreview ? 'Ocultar prévia' : 'Mostrar prévia'}</button><button type="button" onClick={() => void switchScreenShareSource()}>Trocar fonte</button><button className="stop" type="button" onClick={toggleScreenShare}>Encerrar transmissão</button></div>}
-        </> : <>
+        </div>}
+        {(!showingVoiceStage || showingCallChat) && <div className={showingCallChat ? 'call-chat-workspace' : 'text-workspace'} id={showingCallChat ? 'call-chat' : undefined}>
           <div className="stage-head">
-            <div><p>#{selectedTextChannel}</p><span>Canal de texto da Barraca</span></div>
-            <a className="chat-whatsapp-action" href={whatsappInviteUrl} target="_blank" rel="noopener noreferrer">
+            {showingCallChat ? <select aria-label="Canal de texto na call" value={selectedTextChannel} onChange={(event) => setSelectedTextChannel(event.target.value)}>
+              {textChannels.map((channel) => <option key={channel.id} value={channel.id}>#{channel.name}</option>)}
+            </select> : <div><p>#{selectedTextChannel}</p><span>Canal de texto da Barraca</span></div>}
+            {!showingCallChat && <a className="chat-whatsapp-action" href={whatsappInviteUrl} target="_blank" rel="noopener noreferrer">
               Chamar a galera no WhatsApp
-            </a>
+            </a>}
           </div>
           <div className="text-channel-stage">
-            {watchingStream && <section className="text-stream-mini-player" aria-label={`Transmissão de ${streamPublisher || 'um membro'}`}>
+            {!showingCallChat && watchingStream && <section className="text-stream-mini-player" aria-label={`Transmissão de ${streamPublisher || 'um membro'}`}>
               <header><span><i /> AO VIVO</span><strong>{streamPublisher || 'Alguém'} está transmitindo</strong></header>
               <div className="text-stream-annotation-frame">
                 <div ref={streamMiniPlayerRef} className="text-stream-mini-video" />
-                <StreamAnnotations key={annotationSource?.sid} videoFrame={streamMiniPlayerRef} frame={annotations.remote} />
+                <StreamAnnotations key={annotationSource?.sid} videoFrame={streamMiniPlayerRef} {...annotations.remote} />
               </div>
               {renderStreamPlaybackControls(true)}
             </section>}
-            {remoteStream && !watchingStream && <button className="stream-channel-notice" type="button" onClick={() => { setStageView('voice'); watchRemoteStream() }}><span><ControlIcon name="screen" /></span><div><small>TRANSMISSÃO AO VIVO</small><strong>{streamPublisher || 'Alguém'} está transmitindo agora</strong></div><b>Assistir →</b></button>}
+            {!showingCallChat && remoteStream && !watchingStream && <button className="stream-channel-notice" type="button" onClick={() => { setStageView('voice'); watchRemoteStream() }}><span><ControlIcon name="screen" /></span><div><small>TRANSMISSÃO AO VIVO</small><strong>{streamPublisher || 'Alguém'} está transmitindo agora</strong></div><b>Assistir →</b></button>}
             <div className="text-message-list" ref={textMessageListRef} tabIndex={0} role="region" aria-label="Histórico de mensagens"
               onScroll={({ currentTarget: list }) => {
                 followChatRef.current = list.scrollHeight - list.clientHeight - list.scrollTop <= 48
+                if (followChatRef.current && unreadMessageId) setUnreadChat(null)
               }}>
               <div className="text-channel-intro"><span>#</span><div><strong>Bem-vindo a #{selectedTextChannel}</strong><p>Este é o começo do canal. As mensagens ficam guardadas na Barraca.</p></div></div>
-              {textMessages.length ? textMessages.map((chat) => <article className={`text-message ${chat.installationId === viewerId ? 'mine' : ''}`} key={chat.id}
-                tabIndex={chat.installationId === viewerId || chatAdminCode ? 0 : undefined}
-                onContextMenu={(event) => {
-                  if (chat.installationId !== viewerId && !chatAdminCode) return
-                  event.preventDefault()
-                  const rect = event.currentTarget.getBoundingClientRect()
-                  setMemberMenu(null)
-                  setChatMenu({ id: chat.id, channel: selectedTextChannel, x: event.clientX || rect.left, y: event.clientY || rect.top })
-                }}>
-                {memberAvatar(chat.installationId, chat.author, 'text-avatar')}
-                <div><header><strong>{chat.installationId === getInstallationId() ? 'Você' : chat.author}</strong><time>{new Date(chat.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</time>{!chat.media && <button type="button" className="copy-chat-message" onClick={() => void copyChatMessage(chat)}>{copiedChatMessageId === chat.id ? 'Copiado' : 'Copiar'}</button>}</header>{chat.media ? <ChatMessageMedia message={chat.media} endpoint={tokenEndpoint} installationId={viewerId} /> : <ChatMessageBody body={chat.body} endpoint={tokenEndpoint} installationId={viewerId} />}</div>
-              </article>) : <p className="text-chat-empty">Esse canal ainda está quieto. Manda o primeiro salve.</p>}
+              {textMessages.length ? textMessages.map((chat, index) => {
+                const previous = textMessages[index - 1]
+                const grouped = chat.id !== unreadMessageId && previous?.installationId === chat.installationId &&
+                  Date.parse(chat.createdAt) - Date.parse(previous.createdAt) < 5 * 60_000 &&
+                  new Date(chat.createdAt).toDateString() === new Date(previous.createdAt).toDateString()
+                return <Fragment key={chat.id}>
+                  {chat.id === unreadMessageId && <div className="chat-unread-divider" role="separator" aria-label="Novas mensagens">Novas mensagens</div>}
+                  <article id={`chat-message-${chat.id}`} className={`text-message ${chat.installationId === viewerId ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}
+                    tabIndex={-1} onContextMenu={(event) => {
+                      event.preventDefault()
+                      const rect = event.currentTarget.getBoundingClientRect()
+                      setMemberMenu(null)
+                      setChatMenu({ id: chat.id, channel: selectedTextChannel, x: event.clientX || rect.left, y: event.clientY || rect.top })
+                    }}>
+                    {!grouped && memberAvatar(chat.installationId, chat.author, 'text-avatar')}
+                    <div className="chat-message-content">
+                      {!grouped && <header><strong>{memberName(chat.installationId, chat.installationId === viewerId ? 'Você' : chat.author)}</strong><time>{new Date(chat.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</time></header>}
+                      {chat.replyTo && (chat.replyPreview
+                        ? <button type="button" className="chat-reply-quote" disabled={!textMessages.some((item) => item.id === chat.replyTo)} onClick={() => {
+                          const original = document.getElementById(`chat-message-${chat.replyTo}`)
+                          original?.focus({ preventScroll: true })
+                          original?.scrollIntoView({ block: 'nearest' })
+                        }}>
+                          <strong>{chat.replyPreview.author}</strong>
+                          {chat.replyPreview.sticker
+                            ? <ChatMessageMedia message={chat.replyPreview.sticker} endpoint={tokenEndpoint} installationId={viewerId} />
+                            : <span>{chat.replyPreview.body}</span>}
+                        </button>
+                        : <p className="chat-reply-missing">Mensagem original indisponível</p>)}
+                      {chat.media && <ChatMessageMedia message={chat.media} endpoint={tokenEndpoint} installationId={viewerId} />}
+                      {(!chat.media || (chat.media.kind === 'image' && chat.body !== '[Imagem]')) && <ChatMessageBody body={chat.body} endpoint={tokenEndpoint} installationId={viewerId} />}
+                      {Boolean(chat.reactions?.length) && <div className="chat-reactions">{chat.reactions?.map(({ emoji, count, mine, names }) =>
+                        <button type="button" key={emoji} aria-pressed={mine} title={names.join(', ')} aria-label={`${emoji} ${count} reações`} onClick={() => void reactToChatMessage(chat, emoji)}>{emoji} {count}</button>
+                      )}</div>}
+                    </div>
+                    <div className="chat-message-actions" aria-label="Ações da mensagem">
+                      <details className="chat-reaction-picker">
+                        <summary aria-label="Reagir" title="Reagir">☺</summary>
+                        <div>{['👍', '❤️', '😂', '🔥', '😮', '🎉'].map((emoji) => <button key={emoji} type="button" onClick={(event) => {
+                          event.currentTarget.closest('details')?.removeAttribute('open')
+                          void reactToChatMessage(chat, emoji)
+                        }}>{emoji}</button>)}</div>
+                      </details>
+                      <button className="chat-reply-action" type="button" onClick={() => replyToChatMessage(chat)}>Responder</button>
+                      <button type="button" aria-label="Mais opções" onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        setChatMenu({ id: chat.id, channel: selectedTextChannel, x: rect.left, y: rect.bottom })
+                      }}>⋯</button>
+                    </div>
+                  </article>
+                </Fragment>
+              }) : <p className="text-chat-empty">Esse canal ainda está quieto. Manda o primeiro salve.</p>}
             </div>
-            {chatMenu && selectedChatMessage && (selectedChatMessage.installationId === viewerId || chatAdminCode) && createPortal(
+            {chatMenu && selectedChatMessage && createPortal(
               <section className="member-audio-menu chat-context-menu" aria-label="Opções da mensagem"
-                style={{ left: Math.max(8, Math.min(chatMenu.x, window.innerWidth - 188)), top: Math.max(8, Math.min(chatMenu.y, window.innerHeight - 60)) }}>
-                <button type="button" autoFocus onClick={() => void deleteChatMessage(chatMenu.id, chatMenu.channel, chatAdminCode)}>Excluir mensagem</button>
+                style={{ left: Math.max(8, Math.min(chatMenu.x, window.innerWidth - 188)), top: Math.max(8, Math.min(chatMenu.y, window.innerHeight - 124)) }}>
+                <button type="button" autoFocus onClick={() => replyToChatMessage(selectedChatMessage)}>Responder</button>
+                {!selectedChatMessage.media && <button type="button" onClick={() => { setChatMenu(null); void copyChatMessage(selectedChatMessage) }}>{copiedChatMessageId === selectedChatMessage.id ? 'Copiado' : 'Copiar mensagem'}</button>}
+                {(selectedChatMessage.installationId === viewerId || chatAdminCode) && <button type="button" className="chat-delete-action" onClick={() => void deleteChatMessage(chatMenu.id, chatMenu.channel, chatAdminCode)}>Excluir mensagem</button>}
               </section>, document.body,
             )}
-            <form className="text-composer" onSubmit={sendTextMessage}><input value={textDraft} onChange={(event) => setTextDraft(event.target.value)} maxLength={1_000} disabled={barracaAccess !== 'available'} placeholder={barracaAccess === 'available' ? `Conversar em #${selectedTextChannel}` : 'Aguardando conexão com a Barraca…'} aria-label={`Conversar em #${selectedTextChannel}. Emojis: ${systemText.emojiKeys}`} /><ChatMedia key={selectedTextChannel} endpoint={tokenEndpoint} installationId={viewerId} channel={selectedTextChannel} microphone={microphoneDevice} disabled={barracaAccess !== 'available'} onMessage={(message) => {
+            {activeChatReply && <div className="chat-reply-draft">
+              {activeChatReply.media?.kind === 'sticker' && <ChatMessageMedia message={activeChatReply.media} endpoint={tokenEndpoint} installationId={viewerId} />}
+              <div><strong>Respondendo a {activeChatReply.author}</strong><span>{activeChatReply.body}</span></div>
+              <button type="button" onClick={() => setChatReply(null)} aria-label="Cancelar resposta">&times;</button>
+            </div>}
+            <form className="text-composer" onSubmit={sendTextMessage} onPaste={(event) => {
+              const file = Array.from(event.clipboardData.files).find((item) => /^image\/(png|jpeg|webp|gif)$/.test(item.type))
+              if (!file || barracaAccess !== 'available') return
+              event.preventDefault()
+              if (file.size > 5 * 1024 * 1024) { setMessage('Cole uma imagem de até 5 MB.', 'warning'); return }
+              if (pastedChatImage?.channel === selectedTextChannel) { setMessage('Envie ou descarte a imagem que já está na prévia.', 'warning'); return }
+              setPastedChatImage({ channel: selectedTextChannel, file })
+            }}><input ref={chatInputRef} value={textDraft} onChange={(event) => setTextDraft(event.target.value)} maxLength={1_000} disabled={barracaAccess !== 'available'} placeholder={barracaAccess === 'available' ? `Conversar em #${selectedTextChannel}` : 'Aguardando conexão com a Barraca…'} aria-label={`Conversar em #${selectedTextChannel}. Emojis: ${systemText.emojiKeys}`} /><ChatMedia key={selectedTextChannel} endpoint={tokenEndpoint} installationId={viewerId} channel={selectedTextChannel} replyTo={activeChatReply?.id} microphone={microphoneDevice} disabled={barracaAccess !== 'available'} pastedImage={pastedChatImage?.channel === selectedTextChannel ? pastedChatImage.file : undefined} onDiscardImage={() => setPastedChatImage((current) => current?.channel === selectedTextChannel ? null : current)} onMessage={(message) => {
               followChatRef.current = true
+              setChatReply((current) => current === chatReply ? null : current)
               setTextMessages((items) => items.some((item) => item.id === message.id) ? items : [...items, message])
             }} /><span className="emoji-hint" title={systemText.emojiHint}>☺</span><button type="submit" disabled={!textDraft.trim() || barracaAccess !== 'available'} title="Enviar mensagem">Enviar <span>↑</span></button></form>
           </div>
-        </>}
+        </div>}
+        </div>
         {isSharing && screenAudioWarning && <div className="stream-audio-notice" role="status">{screenAudioWarning}</div>}
         {watchingStream && streamVolume === 0 && <div className="stream-audio-notice" role="status"><span>O volume da transmissão está em 0%. Você não ouvirá o som compartilhado.</span><button type="button" onClick={() => setStreamVolume(100)}>Ativar som da transmissão</button></div>}
         <div className={`stage-message ${notice.tone} ${isConnecting || isReconnecting ? 'pending' : ''}`} role={notice.tone === 'error' ? 'alert' : 'status'}><i />{notice.tone === 'error' ? 'Erro: ' : notice.tone === 'warning' ? 'Atenção: ' : ''}{message}</div>
@@ -2329,13 +2491,15 @@ function App() {
               setMemberMenu({ id: member.installationId, x: event.clientX, y: event.clientY })
             }} title={!isSelf ? 'Clique com o botão direito para ver as opções' : undefined}>
               {memberAvatar(member.installationId, member.name, 'member-avatar')}
-              <div className="remote-member-info"><strong>{member.name} {isSelf && <small>você</small>}</strong><span className={`member-status ${member.status}`}>{statusText}</span></div>
+              <div className="remote-member-info"><strong>{memberName(member.installationId, member.name)} {isSelf && <small>você</small>}</strong><span className={`member-status ${member.status}`}>{statusText}</span></div>
               {memberMenu?.id === member.installationId && createPortal(
                 <section className="member-audio-menu member-context-menu" aria-label={`Opções de ${member.name}`}
-                  style={{ left: Math.max(8, Math.min(memberMenu.x, window.innerWidth - 238)), top: Math.max(8, Math.min(memberMenu.y, window.innerHeight - (canAdjustAudio ? 175 : 92))) }}
+                  style={{ left: Math.max(8, Math.min(memberMenu.x, window.innerWidth - 238)), top: Math.max(8, Math.min(memberMenu.y, window.innerHeight - (canAdjustAudio ? 220 : 130))) }}
                   onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
                   <header><strong>{member.name}</strong><button type="button" onClick={() => setMemberMenu(null)} aria-label="Fechar">?</button></header>
                   <button type="button" onClick={() => void callAttention(member.installationId, member.name)}><ControlIcon name="sound" />Chamar atenção</button>
+                  {connected && activeVoiceChannel === member.channelId && !isSelf && member.status !== 'streaming' &&
+                    <button type="button" onClick={() => void callAttention(member.installationId, member.name, 'share-request')}><ControlIcon name="screen" />Pedir para compartilhar</button>}
                   {canAdjustAudio && <><button type="button" className={audio.muted ? 'muted' : ''} onClick={() => changeParticipantAudio(member.installationId, { muted: !audio.muted })}><ControlIcon name={audio.muted ? 'soundOff' : 'sound'} />{audio.muted ? 'Ouvir novamente' : 'Silenciar para mim'}</button><label>Volume <output>{audio.volume}%</output><input type="range" min="0" max="100" value={audio.volume} onChange={(event) => changeParticipantAudio(member.installationId, { volume: Number(event.target.value) })} aria-label={`Volume de ${member.name}`} /></label></>}
                 </section>, document.body,
               )}
@@ -2349,7 +2513,7 @@ function App() {
     {authorizedInstallation && profileTarget && <MemberProfile key={profileTarget.id} target={profileTarget} viewerId={viewerId}
       url={profileUrl(profileTarget.id)} close={() => setProfileTarget(null)}
       callAttention={() => void callAttention(profileTarget.id, profileTarget.name)}
-      saved={(avatarRevision) => setPresenceMembers((members) => members.map((member) => member.installationId === viewerId ? { ...member, avatarRevision } : member))} />}
+      saved={(appearance, avatarRevision) => setPresenceMembers((members) => members.map((member) => member.installationId === viewerId ? { ...member, appearance, avatarRevision } : member))} />}
 
     {linuxShareOpen && <LinuxSharePicker audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => { setLinuxShareOpen(false); setMessage('A escolha de tela foi cancelada.') }} onStart={(mode, ids) => void startLinuxShare(mode, ids)} />}
     {shareSources && <SharePicker sources={shareSources} audioMode={shareAudioMode} onAudioModeChange={setShareAudioMode} quality={nextShareQuality} onQualityChange={({ resolution, fps }) => setQualityProfile(resolution === 720 ? fps === 60 ? 'gaming' : 'smooth' : fps === 30 ? 'auto' : 'maximum')} onClose={() => void chooseShareSource(null)} onStart={(sourceId, audioSourceIds, mode) => void chooseShareSource(sourceId, audioSourceIds, mode)} onRefresh={async () => {
@@ -2364,7 +2528,7 @@ function App() {
     {settingsOpen && <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Configurações"><section className="settings-card"><header><div><small>AJUSTES DA SALA</small><h2>Configurações</h2></div><button type="button" onClick={closeSettings} aria-label="Fechar">×</button></header><div className="settings-section"><div className="settings-title"><strong>Áudio</strong><button type="button" onClick={() => void refreshDevices()}>Atualizar</button></div><label>Microfone<select value={microphoneDevice} onChange={(event) => void changeDevice('audioinput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audioinput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microfone ${index + 1}`}</option>)}</select></label><label>Saída de áudio<select value={speakerDevice} onChange={(event) => void changeDevice('audiooutput', event.target.value)}><option value="default">Padrão do sistema</option>{devices.filter((device) => device.kind === 'audiooutput').map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Saída ${index + 1}`}</option>)}</select></label><label className="volume-setting">Volume da galera <strong>{remoteVolume}%</strong><input type="range" min="0" max="100" value={remoteVolume} onChange={(event) => setRemoteVolume(Number(event.target.value))} /></label><div className="microphone-test"><div><small>TESTE DE MICROFONE</small><strong>{connected ? (microphoneOn ? 'Seu microfone está ligado.' : 'Seu microfone está desligado.') : microphoneTestActive ? 'Fale normalmente para testar.' : 'Teste antes de entrar em uma call.'}</strong></div><div className="microphone-level" aria-label="Nível do microfone"><i style={{ width: `${microphoneTestLevel}%` }} /></div><button type="button" onClick={() => void toggleMicrophoneTest()} disabled={connected}>{microphoneTestActive ? 'Parar teste' : 'Testar microfone'}</button></div></div><div className="settings-section"><strong>Qualidade da transmissão</strong><div className="quality-options"><button className={qualityProfile === 'smooth' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('smooth')}><b>Suave</b><span>720p · 30 fps</span></button><button className={qualityProfile === 'auto' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('auto')}><b>Automática</b><span>1080p · 30 fps</span></button><button className={qualityProfile === 'maximum' ? 'selected' : ''} type="button" onClick={() => setQualityProfile('maximum')}><b>Máxima</b><span>1080p · 60 fps</span></button></div><p>As preferências são salvas neste computador e valem na próxima call ou transmissão.</p></div>{isHostApp && <div className="settings-section host-availability-setting"><strong>Barraca neste computador</strong><p>Quando o Barracord Anfitrião abrir, deixe a Barraca pronta para a galera. Fechar o app ainda encerra a Barraca.</p><label><input type="checkbox" checked={keepBarracaAvailable} onChange={(event) => setKeepBarracaAvailable(event.target.checked)} /> Manter a Barraca disponível ao abrir</label></div>}<button className="settings-done" type="button" onClick={closeSettings}>Pronto</button></section></div>}
 
     {!authorizedInstallation && <div className="join-overlay"><form className="join-card" onSubmit={authorizeInstallation}>
-      <div className="join-brand"><span className="brand-symbol">B</span><div><small>BEM-VINDO À</small><strong>BARRACORD</strong></div></div>
+      <div className="join-brand"><img className="brand-preview-mark" src={previewMark} alt="" /><div><small>BEM-VINDO À</small><strong>BARRACORD</strong></div></div>
       <h1>{window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' ? <>Prepare seu acesso<br /><em>à Barraca.</em></> : <>A turma está<br /><em>na Barraca.</em></>}</h1>
       {window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' && <><label>Seu nome<input value={participantName} onChange={(event) => setParticipantName(event.target.value)} placeholder="Como a galera te chama?" autoFocus /></label><label>Código de ativação<input value={invite} onChange={(event) => setInvite(event.target.value.trim())} placeholder="BARRACA1.…" type="text" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label></>}
       {window.chriscordDesktop && !isHostApp && tailscaleStatus !== 'ready' ? <section className="private-network-setup"><span className="network-setup-icon">⌁</span><div><small>REDE DA BARRACA</small><strong>{tailscaleStatus === 'missing' ? 'Vamos instalar a conexão privada.' : tailscaleStatus === 'offline' ? 'Vamos conectar este computador.' : tailscaleStatus === 'needs-attention' ? 'A conexão privada precisa de atenção.' : 'Vamos conferir sua conexão privada.'}</strong></div><p>O Barracord usa o código de ativação para conectar este PC. {systemText.The} pode pedir uma única confirmação de administrador; não é preciso criar nem acessar uma conta Tailscale.</p><div className="private-network-actions"><button type="button" onClick={() => void preparePrivateNetwork()} disabled={privateNetworkAction || privateNetworkChecking || !invite.trim() || tailscaleStatus === 'needs-attention'}>{privateNetworkAction ? 'Preparando…' : tailscaleStatus === 'needs-attention' ? 'Verifique a conexão' : 'Instalar e conectar'}</button><button className="secondary" type="button" onClick={() => void refreshPrivateNetworkStatus(tailscaleStatus === 'needs-attention' || tailscaleStatus === 'offline')} disabled={privateNetworkAction || privateNetworkChecking}>{privateNetworkChecking ? 'Verificando…' : tailscaleStatus === 'needs-attention' || tailscaleStatus === 'offline' ? systemText.confirm : 'Verificar novamente'}</button></div>{privateNetworkMessage && <em>{privateNetworkMessage}</em>}</section> : <><p>Use a ativação que recebeu para autorizar este computador uma única vez.</p><label>Seu nome<input value={participantName} onChange={(event) => setParticipantName(event.target.value)} placeholder="Como a galera te chama?" autoFocus /></label><label>Código de ativação<input value={invite} onChange={(event) => setInvite(event.target.value.trim())} placeholder="BARRACA1.…" type="text" autoCapitalize="off" autoCorrect="off" spellCheck={false} /></label>{isDevelopment ? <details><summary>Configuração avançada</summary><label>Servidor<input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} /></label><label>Convites<input value={tokenEndpoint} onChange={(event) => setTokenEndpoint(event.target.value)} /></label></details> : <p className="private-setup"><i /> Conexão privada pronta.</p>}</>}

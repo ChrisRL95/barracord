@@ -2,13 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './MemberProfile.css'
 
-type Profile = { avatar: string; banner: string; bio: string; color: string; revision: string }
+export type ProfileAppearance = { nickColor?: string; font?: string; frame?: string; badge?: string; color?: string; effect?: string; bannerRevision?: string }
+type Profile = ProfileAppearance & { avatar: string; banner: string; bio: string; color: string; revision: string }
 export type ProfileTarget = { id: string; name: string }
-const emptyProfile: Profile = { avatar: '', banner: '', bio: '', color: '#3d325c', revision: '' }
+const emptyProfile: Profile = { avatar: '', banner: '', bio: '', color: '#125361', revision: '' }
 const imageUrl = (value: string) => 'data:image/jpeg;base64,' + value
 
-export function ProfileAvatar({ name, className, image, onClick }: { name: string; className: string; image?: string; onClick: () => void }) {
-  return <button type="button" className={`profile-avatar-button ${className}`} title={`Perfil de ${name}`} aria-label={`Abrir perfil de ${name}`} onClick={onClick}>
+export function ProfileName({ name, appearance }: { name: string; appearance?: ProfileAppearance }) {
+  return <><span className="profile-nick" data-font={appearance?.font} style={{ color: appearance?.nickColor || undefined }}>{name}</span>
+    {appearance?.badge && <span className="profile-badge" title={appearance.badge}>{appearance.badge}</span>}</>
+}
+
+export function ProfileAvatar({ name, className, image, frame, onClick }: { name: string; className: string; image?: string; frame?: string; onClick: () => void }) {
+  return <button type="button" className={`profile-avatar-button ${className}`} data-frame={frame} title={`Perfil de ${name}`} aria-label={`Abrir perfil de ${name}`} onClick={onClick}>
     {name.slice(0, 1).toUpperCase()}
     {image && <img src={image} alt="" onError={(event) => { event.currentTarget.style.visibility = 'hidden' }} key={image} />}
   </button>
@@ -41,22 +47,22 @@ async function prepareImage(file: File, kind: 'avatar' | 'banner') {
 }
 
 function ProfileCard({ name, profile }: { name: string; profile: Profile }) {
-  return <article className="member-profile-card">
+  return <article className="member-profile-card" data-effect={profile.effect}>
     <div className="member-profile-banner" style={{ backgroundColor: profile.color }}>
       {profile.banner && <img src={imageUrl(profile.banner)} alt="" />}
     </div>
     <div className="member-profile-details">
-      <div className="member-profile-photo" style={{ borderColor: profile.color }}>
+      <div className="member-profile-photo" data-frame={profile.frame} style={{ borderColor: profile.frame ? undefined : profile.color }}>
         {profile.avatar ? <img src={imageUrl(profile.avatar)} alt="" /> : name.slice(0, 1).toUpperCase()}
       </div>
-      <strong>{name}</strong>
+      <strong><ProfileName name={name} appearance={profile} /></strong>
       {profile.bio && <div className="member-profile-bio"><small>SOBRE MIM</small><p>{profile.bio}</p></div>}
     </div>
   </article>
 }
 
 export default function MemberProfile({ target, viewerId, url, close, saved, callAttention }: {
-  target: ProfileTarget; viewerId: string; url: string; close: () => void; saved: (revision?: string) => void; callAttention: () => void
+  target: ProfileTarget; viewerId: string; url: string; close: () => void; saved: (appearance: ProfileAppearance, revision?: string) => void; callAttention: () => void
 }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [draft, setDraft] = useState<Profile | null>(null)
@@ -106,7 +112,8 @@ export default function MemberProfile({ target, viewerId, url, close, saved, cal
       const body = await response.json()
       if (!response.ok) throw new Error(body.error || 'Não foi possível salvar o perfil.')
       setDraft(body.profile)
-      saved(body.profile.avatar ? body.profile.revision : undefined)
+      const { nickColor, font, frame, badge, color, effect, banner, avatar, revision } = body.profile
+      saved({ nickColor, font, frame, badge, color, effect, bannerRevision: banner ? revision : undefined }, avatar ? revision : undefined)
       setNotice('Perfil salvo.')
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Não foi possível salvar o perfil.') }
     finally { setBusy(false) }
@@ -131,6 +138,20 @@ export default function MemberProfile({ target, viewerId, url, close, saved, cal
             {draft[kind] && <button type="button" disabled={busy} onClick={() => { setDraft({ ...draft, [kind]: '' }); setNotice('') }}>Remover {kind === 'avatar' ? 'foto' : 'banner'}</button>}
           </div>)}
           <label className="member-profile-color">Cor de destaque<input type="color" value={draft.color} disabled={busy} onChange={(event) => { setDraft({ ...draft, color: event.target.value }); setNotice('') }} /></label>
+          <div className="member-profile-color">
+            <label>Cor do nick<input type="color" value={draft.nickColor || '#eee7ff'} disabled={busy} onChange={(event) => { setDraft({ ...draft, nickColor: event.target.value }); setNotice('') }} /></label>
+            <button type="button" disabled={busy || !draft.nickColor} onClick={() => { setDraft({ ...draft, nickColor: '' }); setNotice('') }}>Usar padrão</button>
+          </div>
+          {([
+            ['font', 'Fonte do nick', [['rounded', 'Arredondada'], ['retro', 'Retrô'], ['mono', 'Monoespaçada']]],
+            ['frame', 'Moldura do avatar', [['neon', 'Neon'], ['gold', 'Dourada'], ['holo', 'Holográfica']]],
+            ['effect', 'Efeito no cartão', [['glow', 'Aura'], ['shine', 'Reflexo']]],
+          ] as const).map(([field, label, options]) => <label key={field}>{label}
+            <select value={draft[field] || ''} disabled={busy} onChange={(event) => { setDraft({ ...draft, [field]: event.target.value }); setNotice('') }}>
+              <option value="">{field === 'font' ? 'Padrão' : 'Nenhum'}</option>
+              {options.map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+            </select></label>)}
+          <label>Selo personalizado<input type="text" maxLength={24} value={draft.badge || ''} disabled={busy} placeholder="🎧 DJ da Barraca" onChange={(event) => { setDraft({ ...draft, badge: event.target.value }); setNotice('') }} /></label>
           <label>Sobre mim<textarea value={draft.bio} maxLength={180} rows={3} disabled={busy} placeholder="Conte um pouco sobre você…" onChange={(event) => { setDraft({ ...draft, bio: event.target.value }); setNotice('') }} /></label>
           <small>{draft.bio.length}/180</small>
           <footer><span role="status">{notice}</span><button type="submit" className="member-profile-save" disabled={busy}>{busy ? 'Aguarde…' : 'Salvar perfil'}</button></footer>

@@ -164,7 +164,7 @@ function SoundEditor({ cancel, save, speaker }: {
         onPointerMove={(event) => {
           if (!busy && event.currentTarget.hasPointerCapture(event.pointerId)) adjustTrim(drag.current, position(event.currentTarget, event.clientX))
         }}>
-        <rect x={range.start / duration * 600} y="0" width={(range.end - range.start) / duration * 600} height="88" fill="#3d325c" />
+        <rect x={range.start / duration * 600} y="0" width={(range.end - range.start) / duration * 600} height="88" fill="var(--violet)" />
         {bars.map((height, index) => {
           const time = (index + 0.5) / 200 * duration
           return <line key={index} x1={index * 3 + 1.5} x2={index * 3 + 1.5} y1={44 - height} y2={44 + height}
@@ -368,8 +368,9 @@ export default function Soundboard({ endpoint, installationId, room, deafened, s
           {error && <p className="sb-error" role="alert">{error}</p>}
           {!loading && !filtered.length && <p className="sb-empty">{query ? 'Nenhum som encontrado.' : 'A biblioteca está vazia. Adicione o primeiro som da turma.'}</p>}
           <ul className="sb-grid">{filtered.map((sound) => <li key={sound.id} className="sb-tile">
-            <button type="button" className="sb-sound" disabled={!canSend} aria-label={'Tocar ' + sound.name + ' na call'} title={sound.author + ' · ' + formatTime(sound.duration)} onClick={() => void send(sound)}>
-              <span aria-hidden="true">{sound.emoji || '♫'}</span><strong>{sound.name}</strong>
+            <button type="button" className="sb-sound" disabled={!canSend} aria-label={'Tocar ' + sound.name + ' na call'} title={sound.name + ' · ' + sound.author} onClick={() => void send(sound)}>
+              <span className="sb-sound-icon" aria-hidden="true">{sound.emoji || '♫'}</span>
+              <span className="sb-sound-details"><strong>{sound.name}</strong><small>{formatTime(sound.duration)}</small></span>
             </button>
             {sound.owner === installationId && <button type="button" className="sb-delete" aria-label={'Remover ' + sound.name} onClick={() => void remove(sound)}>×</button>}
           </li>)}</ul>
